@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>跌倒检测监控台</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, "Microsoft YaHei", sans-serif; }
+    body { margin: 0; background:#09111f; color:#e5eefc; }
+    header { padding:24px max(24px,5vw); border-bottom:1px solid #24334d; background:#0d1728; }
+    h1 { margin:0 0 6px; font-size:24px; } header p { margin:0; color:#91a5c3; }
+    main { padding:24px max(24px,5vw); display:grid; gap:24px; }
+    section { background:#101c30; border:1px solid #24334d; border-radius:14px; padding:18px; }
+    h2 { margin:0 0 14px; font-size:18px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:12px; }
+    .stats { display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:12px; }
+    .stat { background:#15243c; border-radius:10px; padding:14px; }
+    .stat strong { display:block; margin-top:5px; font-size:26px; }
+    .card { background:#15243c; border-radius:10px; padding:14px; border-left:4px solid #3b82f6; }
+    .alarm { border-left-color:#ef4444; } .invalid { border-left-color:#f59e0b; }
+    .row { display:flex; justify-content:space-between; gap:12px; margin-top:7px; color:#b9c7dc; }
+    .value { color:#fff; font-weight:650; } .muted { color:#91a5c3; }
+    .badge { display:inline-block; margin-left:7px; padding:2px 7px; border-radius:999px; font-size:12px; }
+    .test { background:#7c3aed; } .online { background:#15803d; } .offline { background:#475569; }
+    table { width:100%; border-collapse:collapse; font-size:14px; }
+    th,td { text-align:left; padding:10px 8px; border-bottom:1px solid #24334d; }
+    th { color:#91a5c3; } button { color:white; background:#2563eb; border:0; border-radius:7px; padding:7px 10px; cursor:pointer; }
+    button:disabled { background:#41516c; cursor:default; }
+    .controls { display:flex; gap:20px; flex-wrap:wrap; color:#b9c7dc; }
+    .controls label { cursor:pointer; }
+    #message { color:#fbbf24; min-height:20px; }
+    @media(max-width:700px){ .table-wrap{overflow:auto} .stats{grid-template-columns:repeat(2,1fr)} }
+  </style>
+</head>
+<body>
+  <header><h1>居家跌倒检测监控台</h1><p>Nano 板端推理 · HTTP 云端记录</p></header>
+  <main>
+    <div id="message"></div>
+    <div id="stats" class="stats"></div>
+    <section class="controls">
+      <label><input id="hide-tests" type="checkbox"> 隐藏测试数据</label>
+      <label><input id="open-only" type="checkbox"> 只看未处理报警</label>
+    </section>
+    <section><h2>设备最新状态</h2><div id="devices" class="grid"></div></section>
+    <section><h2>候选报警</h2><div class="table-wrap"><table>
+      <thead><tr><th>设备</th><th>分数 / 阈值</th><th>接收时间</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody id="alerts"></tbody>
+    </table></div></section>
+  </main>
+  <script>
+    const escapeHtml = value => String(value ?? "").replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+    const pct = value => value == null ? "—" : `${(value * 100).toFixed(1)}%`;
+    const time = value => value ? new Date(value).toLocaleString() : "—";
+    const testBadge = value => value ? '<span class="badge test">测试</span>' : '';
+    let deviceData = [];
+    let alertData = [];
+
+    async function getJson(url) {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+      return response.json();
+    }
+
+    function render() {
+        const hideTests = document.querySelector('#hide-tests').checked;
+        const openOnly = document.querySelector('#open-only').checked;
+        const devices = deviceData.filter(item => !hideTests || !item.is_test);
+        const alerts = alertData.filter(item => (!hideTests || !item.is_test) && (!openOnly || item.status === 'OPEN'));
+        const online = devices.filter(item => item.connectivity === 'ONLINE').length;
+        const openAlerts = alerts.filter(item => item.status === 'OPEN').length;
+        document.querySelector('#stats').innerHTML = `
+          <div class="stat"><span class="muted">设备总数</span><strong>${devices.length}</strong></div>
+          <div class="stat"><span class="muted">在线设备</span><strong>${online}</strong></div>
+          <div class="stat"><span class="muted">离线设备</span><strong>${devices.length - online}</strong></div>
+          <div class="stat"><span class="muted">未处理报警</span><strong>${openAlerts}</strong></div>`;
+        document.querySelector('#devices').innerHTML = devices.length ? devices.map(item => `
+          <article class="card ${item.state === 'NEW_ALARM' || item.state === 'POSITIVE' ? 'alarm' : ''} ${item.state === 'INVALID' ? 'invalid' : ''}">
+            <div class="value">${escapeHtml(item.device_id)} ${testBadge(item.is_test)}
+              <span class="badge ${item.connectivity === 'ONLINE' ? 'online' : 'offline'}">${escapeHtml(item.connectivity)}</span></div>
+            <div class="row"><span>最近检测结果</span><span class="value">${escapeHtml(item.detection_result)}</span></div>
+            <div class="row"><span>最近检测分数</span><span class="value">${pct(item.fall_probability)}</span></div>
+            <div class="row"><span>板端状态</span><span>${escapeHtml(item.state)}</span></div>
+            <div class="row"><span>最近接收</span><span>${time(item.received_at)}</span></div>
+            <div class="row"><span>数据年龄</span><span>${Number(item.age_seconds)} 秒</span></div>
+            <div class="row"><span>模型</span><span>${escapeHtml(item.model_version)}</span></div>
+          </article>`).join('') : '<p class="muted">尚未收到设备数据。</p>';
+
+        document.querySelector('#alerts').innerHTML = alerts.length ? alerts.map(item => `
+          <tr><td>${escapeHtml(item.device_id)} ${testBadge(item.is_test)}</td>
+          <td>${pct(item.fall_probability)} / ${pct(item.threshold)}</td><td>${time(item.received_at)}</td>
+          <td>${escapeHtml(item.status)}</td><td><button ${item.status !== 'OPEN' ? 'disabled' : ''}
+          onclick="acknowledge(${Number(item.id)})">确认</button></td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无候选报警。</td></tr>';
+    }
+
+    async function refresh() {
+      try {
+        [deviceData, alertData] = await Promise.all([
+          getJson('/api/v1/devices'), getJson('/api/v1/alerts?limit=50')
+        ]);
+        render();
+        document.querySelector('#message').textContent = `最后刷新：${new Date().toLocaleTimeString()}`;
+      } catch (error) { document.querySelector('#message').textContent = `刷新失败：${error.message}`; }
+    }
+
+    async function acknowledge(id) {
+      const apiKey = sessionStorage.getItem('fall_api_key') || prompt('请输入 X-API-Key（本机默认 local-test-key）');
+      if (!apiKey) return;
+      sessionStorage.setItem('fall_api_key', apiKey);
+      const response = await fetch(`/api/v1/alerts/${id}/acknowledge`, {
+        method:'PATCH', headers:{'Content-Type':'application/json','X-API-Key':apiKey},
+        body:JSON.stringify({acknowledged_by:'dashboard-user'})
+      });
+      if (!response.ok) { alert(`确认失败：HTTP ${response.status}`); return; }
+      refresh();
+    }
+
+    document.querySelector('#hide-tests').addEventListener('change', render);
+    document.querySelector('#open-only').addEventListener('change', render);
+    refresh(); setInterval(refresh, 5000);
+  </script>
+</body>
+</html>

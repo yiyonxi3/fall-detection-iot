@@ -44,6 +44,7 @@
     .detail-item strong { overflow-wrap:anywhere; }
     .detail-note { color:#91a5c3; margin:8px 0 12px; }
     .event-trigger { background:#3b1f2b; }
+    .session-break td { background:#292414; color:#fcd34d; padding:10px; }
     .relation { display:inline-block; min-width:48px; padding:2px 6px; border-radius:999px; text-align:center; background:#334155; }
     .relation.trigger { background:#b91c1c; }
     .detail-footer { display:flex; justify-content:flex-end; gap:10px; margin-top:16px; }
@@ -58,7 +59,7 @@
     <div id="stats" class="stats"></div>
     <section class="controls">
       <label><input id="hide-tests" type="checkbox"> 隐藏测试数据</label>
-      <label><input id="open-only" type="checkbox"> 只看未处理报警</label>
+      <label><input id="open-only" type="checkbox"> 只看未查看报警</label>
     </section>
     <section><h2>设备最新状态</h2><div id="devices" class="grid"></div></section>
     <section><h2>候选报警</h2><div class="table-wrap"><table>
@@ -81,6 +82,7 @@
     const time = value => value ? new Date(value).toLocaleString() : "—";
     const duration = value => value == null ? "—" : `${(Number(value) / 1000).toFixed(1)} 秒`;
     const testBadge = value => value ? '<span class="badge test">测试</span>' : '';
+    const alertStatusLabel = value => value === 'ACKNOWLEDGED' ? '已查看' : value === 'OPEN' ? '待查看' : escapeHtml(value);
     let deviceData = [];
     let alertData = [];
     let detailAlertId = null;
@@ -102,7 +104,7 @@
           <div class="stat"><span class="muted">设备总数</span><strong>${devices.length}</strong></div>
           <div class="stat"><span class="muted">在线设备</span><strong>${online}</strong></div>
           <div class="stat"><span class="muted">离线设备</span><strong>${devices.length - online}</strong></div>
-          <div class="stat"><span class="muted">未处理报警</span><strong>${openAlerts}</strong></div>`;
+          <div class="stat"><span class="muted">未查看报警</span><strong>${openAlerts}</strong></div>`;
         document.querySelector('#devices').innerHTML = devices.length ? devices.map(item => `
           <article class="card ${item.state === 'NEW_ALARM' || item.state === 'POSITIVE' ? 'alarm' : ''} ${item.state === 'INVALID' ? 'invalid' : ''}">
             <div class="value">${escapeHtml(item.device_id)} ${testBadge(item.is_test)}
@@ -118,9 +120,9 @@
         document.querySelector('#alerts').innerHTML = alerts.length ? alerts.map(item => `
           <tr><td>${escapeHtml(item.device_id)} ${testBadge(item.is_test)}</td>
           <td>${pct(item.fall_probability)} / ${pct(item.threshold)}</td><td>${time(item.received_at)}</td>
-          <td>${escapeHtml(item.status)}</td><td><div class="actions">
+          <td>${alertStatusLabel(item.status)}</td><td><div class="actions">
           <button class="secondary" onclick="showAlertDetail(${Number(item.id)})">详情</button>
-          <button ${item.status !== 'OPEN' ? 'disabled' : ''} onclick="acknowledge(${Number(item.id)})">确认</button>
+          <button ${item.status !== 'OPEN' ? 'disabled' : ''} onclick="acknowledge(${Number(item.id)})">${item.status === 'OPEN' ? '标记已查看' : '已查看'}</button>
           </div></td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无候选报警。</td></tr>';
     }
 
@@ -134,10 +136,16 @@
       const context = data.context;
       const statusDetail = alertItem.status === 'ACKNOWLEDGED'
         ? `${time(alertItem.acknowledged_at)} · ${escapeHtml(alertItem.acknowledged_by || '未知操作员')}`
-        : '尚未确认';
+        : '尚未查看';
       document.querySelector('#alert-detail-subtitle').innerHTML =
         `${escapeHtml(alertItem.device_id)} ${testBadge(alertItem.is_test)} · 报警 #${Number(alertItem.id)}`;
-      const rows = data.context_events.map(event => `
+      const sessionCount = new Set(data.context_events.map(event => event.session_id)).size;
+      const rows = data.context_events.map((event, index, events) => {
+        const sessionChanged = index > 0 && event.session_id !== events[index - 1].session_id;
+        const boundary = sessionChanged
+          ? '<tr class="session-break"><td colspan="6">设备会话已切换（Session 变化）：以下记录来自另一会话，可能与重启或重新供电有关。</td></tr>'
+          : '';
+        return `${boundary}
         <tr class="${event.relation === 'trigger' ? 'event-trigger' : ''}">
           <td><span class="relation ${event.relation === 'trigger' ? 'trigger' : ''}">${relationLabel(event.relation)}</span></td>
           <td>${time(event.received_at)}</td>
@@ -145,10 +153,11 @@
           <td>${pct(event.fall_probability)}</td>
           <td>${Number(event.sequence)}</td>
           <td>${escapeHtml(event.session_id)}</td>
-        </tr>`).join('');
+        </tr>`;
+      }).join('');
       document.querySelector('#alert-detail-body').innerHTML = `
         <div class="detail-grid">
-          <div class="detail-item"><span>报警状态</span><strong>${escapeHtml(alertItem.status)}</strong></div>
+          <div class="detail-item"><span>查看状态</span><strong>${alertStatusLabel(alertItem.status)} (${escapeHtml(alertItem.status)})</strong></div>
           <div class="detail-item"><span>触发分数 / 阈值</span><strong>${pct(trigger.fall_probability)} / ${pct(trigger.threshold)}</strong></div>
           <div class="detail-item"><span>板端状态</span><strong>${escapeHtml(trigger.state)}</strong></div>
           <div class="detail-item"><span>服务器接收</span><strong>${time(trigger.received_at)}</strong></div>
@@ -156,16 +165,18 @@
           <div class="detail-item"><span>设备运行时间</span><strong>${duration(trigger.uptime_ms)}</strong></div>
           <div class="detail-item"><span>模型</span><strong>${escapeHtml(trigger.model_version)}</strong></div>
           <div class="detail-item"><span>Pipeline</span><strong>${escapeHtml(trigger.pipeline_version)}</strong></div>
-          <div class="detail-item"><span>确认信息</span><strong>${statusDetail}</strong></div>
+          <div class="detail-item"><span>查看记录</span><strong>${statusDetail}</strong></div>
         </div>
         <h2>同设备前后事件</h2>
         <p class="detail-note">显示报警前 ${context.returned_before}/${context.available_before} 条、报警后 ${context.returned_after}/${context.available_after} 条；红色行为报警触发事件。不同设备的数据不会混入。</p>
+        ${sessionCount > 1 ? `<p class="detail-note">本段记录包含 ${sessionCount} 个 Session，按服务器接收顺序排列；跨会话记录不能视为同一次连续运行。</p>` : ''}
         <div class="table-wrap"><table>
           <thead><tr><th>位置</th><th>接收时间</th><th>状态</th><th>分数</th><th>Sequence</th><th>Session</th></tr></thead>
           <tbody>${rows}</tbody>
         </table></div>
+        <p class="detail-note">“标记已查看”仅表示操作员已查看此记录，不代表确认发生跌倒或人员安全。</p>
         <div class="detail-footer">
-          ${alertItem.status === 'OPEN' ? `<button onclick="acknowledge(${Number(alertItem.id)})">确认此报警</button>` : ''}
+          ${alertItem.status === 'OPEN' ? `<button onclick="acknowledge(${Number(alertItem.id)})">标记已查看</button>` : ''}
           <button class="secondary" onclick="closeAlertDetail()">关闭</button>
         </div>`;
     }
@@ -204,7 +215,9 @@
     }
 
     async function acknowledge(id) {
-      const apiKey = sessionStorage.getItem('fall_api_key') || prompt('请输入 X-API-Key（本机默认 local-test-key）');
+      const confirmed = confirm(`将报警 #${Number(id)} 标记为已查看？\n\n此操作仅表示你已查看此记录，不代表确认发生跌倒或人员安全。当前页面不提供撤销功能。`);
+      if (!confirmed) return;
+      const apiKey = sessionStorage.getItem('fall_api_key') || prompt('请输入当前服务的 X-API-Key（仅在本机输入）');
       if (!apiKey) return;
       sessionStorage.setItem('fall_api_key', apiKey);
       const response = await fetch(`/api/v1/alerts/${id}/acknowledge`, {
@@ -213,7 +226,7 @@
       });
       if (!response.ok) {
         if (response.status === 401) sessionStorage.removeItem('fall_api_key');
-        alert(`确认失败：HTTP ${response.status}`); return;
+        alert(`标记已查看失败：HTTP ${response.status}`); return;
       }
       await refresh();
       if (detailAlertId === id) await loadAlertDetail(id);

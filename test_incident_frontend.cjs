@@ -6,7 +6,7 @@ const nodes=new Map();
 function node(selector){if(!nodes.has(selector))nodes.set(selector,{innerHTML:'',textContent:'',value:'',checked:false,open:false,disabled:false,
   addEventListener(){},showModal(){this.open=true},close(){this.open=false}});return nodes.get(selector)}
 const candidate={id:1,status:'OPEN',alarm_required:false,is_test:true,uptime_ms:10000,fall_probability:.9,
-  judgment_category:'UNASSESSED',judgment_note:'<img src=x onerror=alert(1)>',relation_reason:'FIRST_CANDIDATE'};
+  judgment_category:'UNASSESSED',judgment_note:'',relation_reason:'FIRST_CANDIDATE'};
 const item={id:1,incident_key:'incident-1',device_id:'<device>',session_id:'A',candidate_count:2,peak_score:.99,
   created_at:'2026-10-03T00:00:10Z',first_uptime_ms:10000,last_uptime_ms:12000,
   reviewed_count:0,alarm_marked_count:0,review_state:'PENDING',source:'live_ingest',is_test:true,
@@ -31,8 +31,9 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
   await flush();
   assert.match(html,/<summary>技术记录（最近 50 条原始候选）/);
-  assert.match(node('#incidents').innerHTML,/两次疑似跌倒信号/);
-  assert.match(node('#incidents').innerHTML,/请检查设备并核实当时情况/);
+  assert.match(node('#incidents').innerHTML,/两条运动分析评分达到提醒线/);
+  assert.match(node('#incidents').innerHTML,/后续记录不足/);
+  assert.match(node('#incidents').innerHTML,/查看详情/);
   assert.doesNotMatch(node('#incidents').innerHTML,/分数|阈值|Session|99\.0%/);
   assert.match(node('#incidents').innerHTML,/&lt;device&gt;/);
   assert.doesNotMatch(node('#incidents').innerHTML,/<script>/);
@@ -43,6 +44,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
   assert.equal(node('#incident-more').disabled,false);
   await sandbox.loadMoreIncidents();assert.match(node('#incident-page-note').textContent,/51 条提醒/);
   assert.equal(node('#incident-more').disabled,true);
+  candidate.judgment_note='<img src=x onerror=alert(1)>';
   sandbox.showIncidentDetail(1);await flush();
   const detail=node('#incident-detail-body').innerHTML;
   assert.match(detail,/&lt;img src=x onerror=alert\(1\)&gt;/);assert.doesNotMatch(detail,/<img src/);

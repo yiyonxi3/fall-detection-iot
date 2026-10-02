@@ -87,11 +87,44 @@ function check(name,fn){fn();checks++;console.log(`PASS: ${name}`)}
     assert.match(node('#devices').innerHTML,/暂时无法判断/);assert.match(node('#devices').innerHTML,/18分钟/);
     assert.doesNotMatch(node('#devices').innerHTML,/正在检测|5\.1%|NORMAL|模型|窗口|Session|ONLINE|OFFLINE/);
   });
-  check('home reminder says what happened and has one main action',()=>{
-    assert.match(node('#incidents').innerHTML,/一次疑似跌倒信号/);
-    assert.match(node('#incidents').innerHTML,/之后仍有数据传来/);
+  check('home reminder gives a short trigger rationale and one detail action',()=>{
+    assert.match(node('#incidents').innerHTML,/依据：运动分析评分达到提醒线/);
+    assert.match(node('#incidents').innerHTML,/查看详情/);
+    assert.doesNotMatch(node('#incidents').innerHTML,/之后仍有数据传来/);
     assert.equal((node('#incidents').innerHTML.match(/<button /g)||[]).length,1);
     assert.doesNotMatch(node('#incidents').innerHTML,/99\.0%|最高|阈值|窗口|Session|候选观察|已确认|已报警/);
+  });
+  check('manual result replaces repeated machine explanation in a short card',()=>{
+    const record={...candidates()[0],status:'ACKNOWLEDGED',judgment_category:'SUSPECTED_FALSE_POSITIVE',judgment_note:'当时正在快速坐下。'};
+    const card=sandbox.reminderCard(incident({candidates:[record],review_state:'REVIEWED',reviewed_count:1}));
+    assert.match(card,/人工记录：疑似误报。当时正在快速坐下。/);
+    assert.doesNotMatch(card,/依据：|达到提醒线|之后仍有/);assert.match(card,/人工填写/);
+    assert.equal((card.match(/<button /g)||[]).length,1);
+  });
+  check('viewed without a manual record remains unverified',()=>{
+    const card=sandbox.reminderCard(incident({review_state:'REVIEWED',reviewed_count:1}));
+    assert.match(card,/已查看/);assert.match(card,/尚待核实/);assert.doesNotMatch(card,/人工记录：|已核实|确认安全/);
+  });
+  check('partial manual records and conflicting results are not propagated',()=>{
+    const a={...candidates()[0],judgment_category:'SUSPECTED_FALSE_POSITIVE',judgment_note:'坐下'};
+    const b={...candidates()[0],id:2};
+    assert.match(sandbox.humanRecordSummary([a,b]),/1\/2 条已填写/);
+    assert.doesNotMatch(sandbox.humanRecordSummary([a,b]),/疑似误报/);
+    assert.match(sandbox.humanRecordSummary([a,{...b,judgment_category:'NEEDS_VERIFICATION'}]),/核实结果不一致/);
+    assert.match(sandbox.humanRecordSummary([a,{...a,id:2,judgment_note:'另一份说明'}]),/各条说明详见详情/);
+  });
+  check('notes alone do not imply completed verification, and summaries escape user text',()=>{
+    const record={...candidates()[0],judgment_note:'<img src=x onerror=alert(1)>'};
+    const card=sandbox.reminderCard(incident({candidates:[record]}));
+    assert.match(card,/人工说明：/);assert.match(card,/尚未填写核实结果/);
+    assert.match(card,/&lt;img/);assert.doesNotMatch(card,/<img src/);
+    assert.equal(Array.from(sandbox.shortNote('🙂'.repeat(60))).length,49);
+  });
+  check('follow-up describes the received record, not a real-world action or safety',()=>{
+    assert.match(sandbox.postReportStory('NORMAL'),/首条有效记录未再达到提醒线/);
+    assert.match(sandbox.postReportStory('POSITIVE'),/首条有效记录仍达到提醒线/);
+    assert.match(sandbox.postReportStory(null),/缺少足够的后续记录/);
+    assert.doesNotMatch(sandbox.postReportStory('NORMAL'),/已起身|已经安全|未跌倒/);
   });
   sandbox.showIncidentDetail(1);await flush();
   check('incident explanation precedes collapsed technical analysis',()=>{
@@ -104,6 +137,13 @@ function check(name,fn){fn();checks++;console.log(`PASS: ${name}`)}
   check('expanded analysis stays open on refresh',()=>{
     sandbox.rememberPanel('incident-tech-1',true);sandbox.renderIncidentDetail(incidents[0]);
     assert.match(node('#incident-detail-body').innerHTML,/<details class="technical-panel" open/);
+  });
+  check('detailed event records start collapsed and retain expansion on refresh',()=>{
+    let detail=node('#incident-detail-body').innerHTML;
+    assert.match(detail,/<details\s+ontoggle="rememberPanel\('incident-records-1'/);
+    assert.ok(detail.indexOf('查看详细经过与各条记录')<detail.indexOf('查看并处理'));
+    sandbox.rememberPanel('incident-records-1',true);sandbox.renderIncidentDetail(incidents[0]);
+    assert.match(node('#incident-detail-body').innerHTML,/<details open ontoggle="rememberPanel\('incident-records-1'/);
   });
   sandbox.closeIncidentDetail();sandbox.showDeviceDetail(0);
   check('device details preserve diagnostics behind a collapsed panel',()=>{
@@ -142,15 +182,16 @@ function check(name,fn){fn();checks++;console.log(`PASS: ${name}`)}
     evidence:{state:'INCOMPLETE',reasons:['POST_REPORT_TIMEOUT'],post_horizon_reached:false}})];
   await sandbox.refresh();
   check('multiple signals, partial viewing and evidence interruption are plain language',()=>{
-    assert.match(node('#incidents').innerHTML,/两次疑似跌倒信号/);assert.match(node('#incidents').innerHTML,/部分已查看/);
-    assert.match(node('#incidents').innerHTML,/未及时收到新的有效数据/);
+    assert.match(node('#incidents').innerHTML,/两条运动分析评分达到提醒线/);assert.match(node('#incidents').innerHTML,/部分已查看/);
+    assert.match(node('#incidents').innerHTML,/后续记录不足/);
   });
   accepted=false;const beforeCalls=calls.length;await sandbox.setReview(1,true);
   check('cancelling a write performs no request',()=>assert.equal(calls.length,beforeCalls));accepted=true;
   sandbox.showAlertDetail(1);await flush();
   check('candidate handling is plain first and hides its technical fields',()=>{
     const detail=node('#alert-detail-body').innerHTML,plain=detail.slice(0,detail.indexOf('<details'));
-    assert.match(plain,/疑似跌倒记录/);assert.match(plain,/记录处理情况/);
+    assert.match(plain,/疑似跌倒记录/);assert.match(detail,/人工核实记录/);
+    assert.match(detail,/<details\s+ontoggle="rememberPanel\('alert-explanation-1'/);
     assert.doesNotMatch(plain,/99\.0%|Session|Pipeline|阈值|已确认|已报警/);
     assert.match(sandbox.actionButtons(current,false),/标记需要报警/);
   });
@@ -161,13 +202,13 @@ function check(name,fn){fn();checks++;console.log(`PASS: ${name}`)}
     assert.equal(current.status,'ACKNOWLEDGED');assert.equal(current.alarm_required,false);
     assert.match(node('#judgment-note').value,/草稿/);assert.match(node('#alert-detail-body').innerHTML,/&lt;img/);
     assert.doesNotMatch(node('#alert-detail-body').innerHTML,/<img src=x/);
-    assert.doesNotMatch(node('#incidents').innerHTML,/查看情况/);assert.match(node('#incident-history').innerHTML,/已查看/);
+    assert.doesNotMatch(node('#incidents').innerHTML,/查看详情/);assert.match(node('#incident-history').innerHTML,/已查看/);
   });
   await sandbox.saveJudgmentNote(1);await sandbox.setAlarmMark(1,true);await sandbox.setReview(1,false);
   check('notes, alarm mark, revoke and history retain existing behavior',()=>{
     assert.match(current.judgment_note,/草稿/);assert.equal(current.alarm_required,true);assert.equal(current.status,'OPEN');
     assert.match(node('#alert-detail-body').innerHTML,/已查看 → 尚未查看/);
-    assert.match(node('#alert-detail-body').innerHTML,/尚未判断 → 需要联系核实/);
+    assert.match(node('#alert-detail-body').innerHTML,/尚未核实 → 需要联系核实/);
     assert.match(node('#alert-detail-body').innerHTML,/session-break/);
   });
   node('#judgment-note').value='冲突草稿';sandbox.captureNoteDraft();writeStatus=409;

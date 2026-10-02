@@ -162,7 +162,7 @@
     const panelStates = new Map();
     const pendingAlerts = new Set();
     const noteDrafts = new Map();
-    const categories = {UNASSESSED:'尚未判断', SIMULATED_TEST:'模拟测试',
+    const categories = {UNASSESSED:'尚未核实', SIMULATED_TEST:'模拟测试',
       SUSPECTED_FALSE_POSITIVE:'疑似误报', NEEDS_VERIFICATION:'需要联系核实', OTHER:'其他'};
     const categoryLabel = value => categories[value] || String(value ?? '');
     let lastSuccessfulRefreshMs = null;
@@ -250,12 +250,12 @@
 
     function incidentStory(item) {
       const count = Number(item.candidate_count);
-      const lead = count > 1 ? `短时间内记录了${count === 2 ? '两' : count}次疑似跌倒信号，已整理在一起。`
-        : '系统记录了一次疑似跌倒信号。';
+      const lead = count > 1 ? `依据：短时间内${count === 2 ? '两' : count}条运动分析评分达到提醒线，触发疑似跌倒提醒。`
+        : '依据：运动分析评分达到提醒线，触发疑似跌倒提醒。';
       const evidence = item.evidence || {};
       const reasons = evidence.reasons || [];
       let followup = '正在等待后续数据，暂时无法判断当时的实际情况。';
-      if (evidence.state === 'OBSERVED') followup = '之后仍有数据传来，是否真的跌倒还需要核实。';
+      if (evidence.state === 'OBSERVED') followup = postReportStory(evidence.first_post_candidate_report?.state);
       else if (evidence.state === 'INCOMPLETE') followup = reasons.includes('POST_REPORT_TIMEOUT')
         ? '之后未及时收到新的有效数据，无法继续判断。请检查设备并核实当时情况。'
         : '后续数据有间隔或异常，无法连续判断。请检查设备并核实当时情况。';
@@ -263,16 +263,49 @@
         : Number(item.reviewed_count) > 0 ? '部分已查看' : '尚未查看'};
     }
 
+    function postReportStory(state) {
+      if (state === 'NORMAL') return '触发后首条有效记录未再达到提醒线，但不能据此排除跌倒。';
+      if (state === 'POSITIVE' || state === 'NEW_ALARM') return '触发后首条有效记录仍达到提醒线，实际情况需要核实。';
+      return '目前缺少足够的后续记录，实际情况需要核实。';
+    }
+
+    function shortNote(value) {
+      const letters = Array.from(String(value || '').trim().replace(/\s+/g,' '));
+      return letters.slice(0,48).join('')+(letters.length > 48 ? '…' : '');
+    }
+
+    function humanRecordSummary(records) {
+      const filled = records.filter(item=>String(item.judgment_note || '').trim()
+        || (item.judgment_category && item.judgment_category !== 'UNASSESSED'));
+      if (!filled.length) return null;
+      if (filled.length < records.length) return `人工记录：${filled.length}/${records.length} 条已填写，仍有记录待核实。`;
+      const values = new Set(filled.map(item=>item.judgment_category || 'UNASSESSED'));
+      if (values.size > 1) return '人工记录：各条核实结果不一致，请查看详情。';
+      const category = filled[0].judgment_category || 'UNASSESSED';
+      const notes = [...new Set(filled.map(item=>String(item.judgment_note || '').trim()))];
+      if (category === 'UNASSESSED') return notes.length === 1
+        ? `人工说明：${shortNote(notes[0])}（尚未填写核实结果）`
+        : '人工说明已填写，核实结果尚未填写，详见详情。';
+      return `人工记录：${categoryLabel(category)}。${notes.length === 1 ? shortNote(notes[0]) : '各条说明详见详情。'}`;
+    }
+
+    function recordDetailsPanel(key, label, content) {
+      return `<details ${panelStates.get(key) ? 'open' : ''} ontoggle="rememberPanel('${key}',this.open)">
+        <summary id="${key}-toggle">${label}</summary>${content}</details>`;
+    }
+
     function reminderCard(item) {
       const story = incidentStory(item);
+      const manual = humanRecordSummary(item.candidates || []);
+      const caveat = item.evidence?.state === 'INCOMPLETE' ? ' 后续记录不足。' : '';
       return `<article class="card reminder-card ${item.requires_evidence_check ? 'invalid' : item.review_state === 'REVIEWED' ? '' : 'alarm'}">
         <div class="card-head"><h3>疑似跌倒提醒</h3><span class="badge ${item.review_state === 'REVIEWED' ? 'offline' : 'test'}">${story.review}</span></div>
         <p class="card-meta">${shortTime(item.created_at)} · ${escapeHtml(item.device_id)} ${testBadge(item.is_test)}</p>
-        <p class="plain-summary">${story.lead}<br>${story.followup}</p>
+        <p class="plain-summary">${escapeHtml(manual || story.lead+caveat)}</p>
         ${Number(item.alarm_marked_count) > 0 ? '<p class="warning-text">已有人标记需要报警，请查看处理记录。</p>' : ''}
         ${pageIsStale() ? '<p class="warning-text">页面未更新，后续情况等待刷新。</p>' : ''}
-        <div class="card-footer"><span class="muted">提醒 ${Number(item.id)}</span>
-          <button id="reminder-button-${Number(item.id)}" onclick="showIncidentDetail(${Number(item.id)})">查看情况</button></div></article>`;
+        <div class="card-footer"><span class="muted">提醒 ${Number(item.id)}${manual ? ' · 人工填写' : ' · 尚待核实'}</span>
+          <button id="reminder-button-${Number(item.id)}" onclick="showIncidentDetail(${Number(item.id)})">查看详情</button></div></article>`;
     }
 
     function incidentQuery(limit) {
@@ -320,6 +353,7 @@
     function renderIncidentDetail(item) {
       const focusedId = document.activeElement?.id;
       const story = incidentStory(item);
+      const manual = humanRecordSummary(item.candidates);
       const current = devicePresentation({monitoring:item.current_monitoring});
       const technical = `<p class="detail-note">${escapeHtml(item.incident_key)} · Session ${escapeHtml(item.session_id)} ·
           ${item.source === 'reconstructed' ? '从历史上报重建' : '随新上报关联'}</p>
@@ -339,22 +373,27 @@
         ${monitoringHtml({monitoring:item.current_monitoring})}
         <p class="detail-note">以上监测状态是当前查询结果；事件证据是历史观察。已经完成的历史观察不会因后来设备离线而变成中断。</p>
         <button class="secondary" onclick="downloadIncident(${Number(item.id)})">下载事件分析 JSON</button>`;
-      document.querySelector('#incident-detail-body').innerHTML = `
-        <div class="summary-panel"><div class="card-head"><h3>疑似跌倒提醒</h3><span class="badge offline">${story.review}</span></div>
-          <p class="card-meta">提醒时间：${shortTime(item.created_at)}<br>设备：${escapeHtml(item.device_id)} ${testBadge(item.is_test)}</p>
-          <p class="plain-summary">${story.lead}</p><p class="plain-summary">${story.followup}</p>
-          <p class="detail-note">这些记录不能直接确认真实跌倒。请结合当时情况和处理备注核实。</p>
-          ${pageIsStale() ? '<p class="warning-text">页面未更新，后续情况等待刷新。</p>' : ''}</div>
+      const records = `<p class="plain-summary">${escapeHtml(story.lead)}</p><p class="plain-summary">${escapeHtml(story.followup)}</p>
+        <p class="detail-note">时间接近不确认是同一次动作；设备评分不能确认真实跌倒。</p>
         <h2>查看与处理记录</h2>
-        <p class="detail-note">${story.review}。查看记录、填写备注或标记需要报警，都在下面对应记录中操作。</p>
+        <p class="detail-note">${story.review}。在对应记录中查看、填写核实说明或标记需要报警。</p>
         <div class="record-list">${item.candidates.map(candidate=>`<article class="record-row"><div>
           <strong>记录 ${Number(candidate.id)} · ${shortTime(candidate.received_at)}</strong>
           <p>${alertStatusLabel(candidate.status)} · ${alarmMarkLabel(candidate.alarm_required)}</p>
-          ${candidate.judgment_note ? `<p>处理备注：${escapeHtml(candidate.judgment_note)}</p>` : '<p class="muted">尚未填写处理备注。</p>'}
+          <p>人工记录：${escapeHtml(categoryLabel(candidate.judgment_category || 'UNASSESSED'))}</p>
+          ${candidate.judgment_note ? `<p>核实说明：${escapeHtml(candidate.judgment_note)}</p>` : '<p class="muted">尚未填写核实说明。</p>'}
           </div><button id="record-button-${Number(candidate.id)}" class="secondary" onclick="openIncidentCandidate(${Number(candidate.id)})">查看并处理</button></article>`).join('')}</div>
         <p class="detail-note">“已查看”只表示看过记录；报警标记只记录处理决定，不会发送通知。</p>
         <div class="summary-panel"><h3>设备现在的情况</h3><p>${escapeHtml(current.headline)}：${escapeHtml(current.description)}</p>
-          <p class="detail-note">这是现在的设备状态，与上面历史提醒发生时的情况分开显示。</p></div>
+          <p class="detail-note">这是现在的设备状态，不代表历史提醒发生时的情况。</p></div>`;
+      document.querySelector('#incident-detail-body').innerHTML = `
+        <div class="summary-panel"><div class="card-head"><h3>疑似跌倒提醒</h3><span class="badge offline">${story.review}</span></div>
+          <p class="card-meta">提醒时间：${shortTime(item.created_at)}<br>设备：${escapeHtml(item.device_id)} ${testBadge(item.is_test)}</p>
+          <p class="plain-summary">${escapeHtml(manual || story.lead)}</p>
+          <p class="detail-note">${manual ? '以上为人工填写的记录，不是系统自动确认的结论。' : '实际情况尚待核实。'}</p>
+          ${Number(item.alarm_marked_count) > 0 ? '<p class="warning-text">已有人标记需要报警，请查看处理记录。</p>' : ''}
+          ${pageIsStale() ? '<p class="warning-text">页面未更新，后续情况等待刷新。</p>' : ''}</div>
+        ${recordDetailsPanel(`incident-records-${Number(item.id)}`,'查看详细经过与各条记录',records)}
         ${technicalPanel(`incident-tech-${Number(item.id)}`,technical)}`;
       if (focusedId) document.getElementById?.(focusedId)?.focus?.({preventScroll:true});
     }
@@ -632,13 +671,20 @@
           <thead><tr><th>位置</th><th>接收时间</th><th>状态</th><th>分数</th><th>Sequence</th><th>Session</th></tr></thead>
           <tbody>${rows}</tbody>
         </table></div>`;
-      const followup = data.evidence?.first_post_trigger_state
-        ? '这条提醒之后仍有检测数据传来。' : '目前缺少足够的后续记录。';
+      const followup = postReportStory(data.evidence?.first_post_trigger_state);
+      const manual = humanRecordSummary([alertItem]);
+      const explanation = `<p>设备分析当时的运动数据，给出的跌倒评分达到提醒线，因此生成记录。</p>
+        <p>${escapeHtml(followup)}</p>
+        ${(data.evidence?.warnings || []).some(code=>['RECEIVED_REPORT_GAP','INVALID_REPORT_IN_SPAN','CONFIGURATION_CHANGED_IN_SPAN','EVIDENCE_POINTS_TRUNCATED'].includes(code))
+          ? '<p class="warning-text">前后记录有缺口或异常，不能完整对照。</p>' : ''}
+        <p class="detail-note">目前没有原始动作曲线，不能确认撞击、倒地或静止；具体评分和上报记录见技术分析。</p>`;
       document.querySelector('#alert-detail-body').innerHTML = `
         <div class="summary-panel"><h3>疑似跌倒记录</h3>
           <p class="card-meta">${shortTime(trigger.received_at)} · ${escapeHtml(alertItem.device_id)}</p>
-          <p>系统记录到一次疑似跌倒信号。${followup}是否真的跌倒，需要结合当时情况核实。</p>
+          <p>${escapeHtml(manual || '依据：运动分析评分达到提醒线，触发疑似跌倒提醒。')}</p>
+          <p class="detail-note">${manual ? '以上为人工填写的记录，不是系统自动确认的结论。' : '实际情况尚待核实。'}</p>
           <p>查看状态：${alertStatusLabel(alertItem.status)}<br>处理决定：${alarmMarkLabel(alertItem.alarm_required)}</p></div>
+        ${recordDetailsPanel(`alert-explanation-${Number(alertItem.id)}`,'查看判断依据与前后记录',explanation)}
         <div class="processing-actions"><label>操作员名称<input id="detail-operator-name" type="text" maxlength="100" ${pending}
             value="${escapeHtml(document.querySelector('#operator-name').value)}" placeholder="填写组员编号"
             oninput="document.querySelector('#operator-name').value=this.value; rememberOperator()"></label>
@@ -646,13 +692,13 @@
           <div class="actions">${actionButtons(alertItem,false)}</div>
           <p class="detail-note">“已查看”只表示看过记录；“标记需要报警”只记录决定，不会发送通知。未标记不表示排除跌倒。</p></div>
         <div class="note-editor">
-          <h2>记录处理情况</h2>
+          <h2>人工核实记录</h2>
           <p class="detail-note">保存备注不会自动改变查看状态或需要报警标记。</p>
           <p class="detail-note">备注可被页面访问者读取，请用组员编号，避免填写个人信息。</p>
-          <label>判断类别<select id="judgment-category" ${pending} onchange="captureNoteDraft()">
+          <label>核实结果<select id="judgment-category" ${pending} onchange="captureNoteDraft()">
             ${Object.entries(categories).map(([value,label]) => `<option value="${value}" ${draft.category === value ? 'selected' : ''}>${label}</option>`).join('')}
           </select></label>
-          <label>判断原因<textarea id="judgment-note" maxlength="1000" ${pending} oninput="captureNoteDraft()" placeholder="例如：模拟测试；疑似误报；需要联系人员核实。">${escapeHtml(draft.note)}</textarea></label>
+          <label>核实说明<textarea id="judgment-note" maxlength="1000" ${pending} oninput="captureNoteDraft()" placeholder="例如：模拟测试；当时正在坐下；需要联系人员核实。">${escapeHtml(draft.note)}</textarea></label>
           <div class="actions"><button ${pending} onclick="saveJudgmentNote(${Number(alertItem.id)})">保存备注</button>
             <button class="secondary" ${pending} onclick="reloadJudgmentNote(${Number(alertItem.id)})">重新加载已保存备注</button></div>
           <span class="muted">最多 1000 字符，需点击保存。${alertItem.note_updated_at

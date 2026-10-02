@@ -1,4 +1,4 @@
-# Fall Detection API v0.4
+# Fall Detection API v0.5
 
 ## 本机替换
 
@@ -53,6 +53,19 @@ py -m uvicorn main:app --reload
 接口成功响应还会返回 `alert_created` 和服务器接收时间
 `server_received_at`，便于 Nano 判断是否成功创建报警并核对通信。
 
+## 报警详情卡
+
+Dashboard 的每条候选报警都有“详情”按钮。详情卡通过以下只读接口加载：
+
+`GET /api/v1/alerts/{alert_id}/context?before=5&after=5`
+
+接口返回报警触发事件，以及同一设备在其前后的遥测事件。`before` 和 `after`
+默认各为 5，允许范围为 0–20；其他设备的数据不会混入。响应同时说明前后可用、已返回
+及是否还有更多记录。不存在的报警返回 404。
+
+查看详情不需要 API Key；确认报警仍使用受保护的
+`PATCH /api/v1/alerts/{alert_id}/acknowledge`，必须提供 `X-API-Key`。
+
 ## 自动验收
 
 保持服务器运行，另开一个 PowerShell 终端执行：
@@ -62,7 +75,7 @@ py acceptance_test.py --base-url http://127.0.0.1:8000 --api-key local-test-key
 ```
 
 脚本自动验证正常上传、重复去重、`NEW_ALARM` 新建报警、后续 `POSITIVE`
-不重复报警、错误密钥返回 401，以及设备最新状态。测试数据使用独立设备编号并标记为测试。
+不重复报警、报警前后文、错误密钥返回 401，以及设备最新状态。测试数据使用独立设备编号并标记为测试。
 
 ## 云端配置
 

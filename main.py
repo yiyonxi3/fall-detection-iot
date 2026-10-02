@@ -20,7 +20,7 @@ DEVICE_OFFLINE_SECONDS = int(os.getenv("DEVICE_OFFLINE_SECONDS", "30"))
 app = FastAPI(
     title="IoT Fall Detection API",
     description="Nano performs inference; this server receives, stores and displays results.",
-    version="0.4.0",
+    version="0.5.0",
 )
 
 
@@ -236,6 +236,82 @@ def list_alerts(status: Literal["OPEN", "ACKNOWLEDGED"] | None = None,
     with closing(db_connection()) as conn:
         rows = conn.execute(query, params).fetchall()
     return [to_dict(row) for row in rows]
+
+
+@app.get("/api/v1/alerts/{alert_id}/context")
+def alert_context(
+    alert_id: int,
+    before: int = Query(5, ge=0, le=20),
+    after: int = Query(5, ge=0, le=20),
+):
+    """Return one alert and nearby telemetry from the same device only."""
+    with closing(db_connection()) as conn:
+        alert_row = conn.execute(
+            "SELECT * FROM alerts WHERE id=?",
+            (alert_id,),
+        ).fetchone()
+        if alert_row is None:
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        trigger_row = conn.execute(
+            "SELECT * FROM telemetry_events WHERE id=?",
+            (alert_row["telemetry_event_id"],),
+        ).fetchone()
+        if trigger_row is None:
+            raise HTTPException(status_code=500, detail="Alert trigger event is missing")
+
+        device_id = alert_row["device_id"]
+        trigger_id = trigger_row["id"]
+        before_total = conn.execute(
+            "SELECT COUNT(*) FROM telemetry_events WHERE device_id=? AND id<?",
+            (device_id, trigger_id),
+        ).fetchone()[0]
+        after_total = conn.execute(
+            "SELECT COUNT(*) FROM telemetry_events WHERE device_id=? AND id>?",
+            (device_id, trigger_id),
+        ).fetchone()[0]
+
+        before_rows = []
+        if before:
+            before_rows = conn.execute(
+                """SELECT * FROM telemetry_events
+                   WHERE device_id=? AND id<? ORDER BY id DESC LIMIT ?""",
+                (device_id, trigger_id, before),
+            ).fetchall()
+            before_rows.reverse()
+
+        after_rows = []
+        if after:
+            after_rows = conn.execute(
+                """SELECT * FROM telemetry_events
+                   WHERE device_id=? AND id>? ORDER BY id ASC LIMIT ?""",
+                (device_id, trigger_id, after),
+            ).fetchall()
+
+    alert = to_dict(alert_row)
+    trigger_event = to_dict(trigger_row)
+    before_events = [to_dict(row) for row in before_rows]
+    after_events = [to_dict(row) for row in after_rows]
+    context_events = [
+        *[event | {"relation": "before"} for event in before_events],
+        trigger_event | {"relation": "trigger"},
+        *[event | {"relation": "after"} for event in after_events],
+    ]
+    return {
+        "alert": alert,
+        "trigger_event": trigger_event,
+        "context_events": context_events,
+        "context": {
+            "requested_before": before,
+            "requested_after": after,
+            "available_before": before_total,
+            "available_after": after_total,
+            "returned_before": len(before_events),
+            "returned_after": len(after_events),
+            "has_more_before": before_total > len(before_events),
+            "has_more_after": after_total > len(after_events),
+        },
+    }
 
 
 @app.patch(

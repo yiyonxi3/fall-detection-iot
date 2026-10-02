@@ -67,6 +67,22 @@ def main():
     matching = [item for item in alerts if item["device_id"] == device_id]
     assert code == 200 and len(matching) == 1, "NEW_ALARM/POSITIVE alert count is incorrect"
 
+    alert_id = matching[0]["id"]
+    code, context = call(
+        args.base_url,
+        f"/api/v1/alerts/{alert_id}/context?before=5&after=5",
+    )
+    assert code == 200, f"alert context expected 200, got {code}"
+    assert context["alert"]["id"] == alert_id
+    assert context["trigger_event"]["state"] == "NEW_ALARM"
+    assert context["trigger_event"]["device_id"] == device_id
+    assert [item["sequence"] for item in context["context_events"]] == [1, 2, 3]
+    assert [item["relation"] for item in context["context_events"]] == ["before", "trigger", "after"]
+    assert all(item["device_id"] == device_id for item in context["context_events"])
+
+    code, _ = call(args.base_url, "/api/v1/alerts/999999999/context")
+    assert code == 404, f"missing alert context expected 404, got {code}"
+
     bad = common | {"sequence": 4, "fall_probability": 0.10, "state": "NORMAL"}
     code, _ = call(args.base_url, "/api/v1/telemetry", method="POST", body=bad, api_key="wrong-key")
     assert code == 401, f"wrong API key expected 401, got {code}"
@@ -74,7 +90,7 @@ def main():
     code, latest = call(args.base_url, f"/api/v1/devices/{device_id}/latest")
     assert code == 200 and latest["detection_result"] == "FALL"
 
-    print("PASS: health, accepted, duplicate, NEW_ALARM, POSITIVE, API key, device status")
+    print("PASS: health, accepted, duplicate, NEW_ALARM, POSITIVE, alert context, API key, device status")
     print(f"Dashboard: {args.base_url.rstrip('/')}/dashboard")
     print(f"Docs: {args.base_url.rstrip('/')}/docs")
     print(f"Upload: {args.base_url.rstrip('/')}/api/v1/telemetry")

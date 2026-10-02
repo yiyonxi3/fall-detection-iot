@@ -26,9 +26,28 @@
     th,td { text-align:left; padding:10px 8px; border-bottom:1px solid #24334d; }
     th { color:#91a5c3; } button { color:white; background:#2563eb; border:0; border-radius:7px; padding:7px 10px; cursor:pointer; }
     button:disabled { background:#41516c; cursor:default; }
+    button.secondary { background:#334155; }
+    button.close { background:transparent; color:#b9c7dc; font-size:24px; line-height:1; padding:4px 8px; }
+    .actions { display:flex; gap:8px; align-items:center; }
     .controls { display:flex; gap:20px; flex-wrap:wrap; color:#b9c7dc; }
     .controls label { cursor:pointer; }
     #message { color:#fbbf24; min-height:20px; }
+    dialog { width:min(980px,calc(100vw - 32px)); max-height:calc(100vh - 32px); padding:0; border:1px solid #334766;
+      border-radius:16px; color:#e5eefc; background:#101c30; box-shadow:0 24px 80px #000a; }
+    dialog::backdrop { background:#020617cc; }
+    .detail-shell { padding:20px; }
+    .detail-head { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:16px; }
+    .detail-head h2 { margin:0 0 5px; }
+    .detail-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; margin-bottom:18px; }
+    .detail-item { background:#15243c; border-radius:9px; padding:11px; }
+    .detail-item span { display:block; color:#91a5c3; font-size:12px; margin-bottom:5px; }
+    .detail-item strong { overflow-wrap:anywhere; }
+    .detail-note { color:#91a5c3; margin:8px 0 12px; }
+    .event-trigger { background:#3b1f2b; }
+    .relation { display:inline-block; min-width:48px; padding:2px 6px; border-radius:999px; text-align:center; background:#334155; }
+    .relation.trigger { background:#b91c1c; }
+    .detail-footer { display:flex; justify-content:flex-end; gap:10px; margin-top:16px; }
+    .error { color:#fca5a5; }
     @media(max-width:700px){ .table-wrap{overflow:auto} .stats{grid-template-columns:repeat(2,1fr)} }
   </style>
 </head>
@@ -47,13 +66,24 @@
       <tbody id="alerts"></tbody>
     </table></div></section>
   </main>
+  <dialog id="alert-detail-dialog" aria-labelledby="alert-detail-title">
+    <div class="detail-shell">
+      <div class="detail-head">
+        <div><h2 id="alert-detail-title">报警详情</h2><div id="alert-detail-subtitle" class="muted"></div></div>
+        <button type="button" class="close" aria-label="关闭" onclick="closeAlertDetail()">×</button>
+      </div>
+      <div id="alert-detail-body" class="muted">正在加载…</div>
+    </div>
+  </dialog>
   <script>
     const escapeHtml = value => String(value ?? "").replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
     const pct = value => value == null ? "—" : `${(value * 100).toFixed(1)}%`;
     const time = value => value ? new Date(value).toLocaleString() : "—";
+    const duration = value => value == null ? "—" : `${(Number(value) / 1000).toFixed(1)} 秒`;
     const testBadge = value => value ? '<span class="badge test">测试</span>' : '';
     let deviceData = [];
     let alertData = [];
+    let detailAlertId = null;
 
     async function getJson(url) {
       const response = await fetch(url);
@@ -88,8 +118,79 @@
         document.querySelector('#alerts').innerHTML = alerts.length ? alerts.map(item => `
           <tr><td>${escapeHtml(item.device_id)} ${testBadge(item.is_test)}</td>
           <td>${pct(item.fall_probability)} / ${pct(item.threshold)}</td><td>${time(item.received_at)}</td>
-          <td>${escapeHtml(item.status)}</td><td><button ${item.status !== 'OPEN' ? 'disabled' : ''}
-          onclick="acknowledge(${Number(item.id)})">确认</button></td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无候选报警。</td></tr>';
+          <td>${escapeHtml(item.status)}</td><td><div class="actions">
+          <button class="secondary" onclick="showAlertDetail(${Number(item.id)})">详情</button>
+          <button ${item.status !== 'OPEN' ? 'disabled' : ''} onclick="acknowledge(${Number(item.id)})">确认</button>
+          </div></td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无候选报警。</td></tr>';
+    }
+
+    function relationLabel(relation) {
+      return relation === 'trigger' ? '触发' : relation === 'before' ? '报警前' : '报警后';
+    }
+
+    function renderAlertDetail(data) {
+      const alertItem = data.alert;
+      const trigger = data.trigger_event;
+      const context = data.context;
+      const statusDetail = alertItem.status === 'ACKNOWLEDGED'
+        ? `${time(alertItem.acknowledged_at)} · ${escapeHtml(alertItem.acknowledged_by || '未知操作员')}`
+        : '尚未确认';
+      document.querySelector('#alert-detail-subtitle').innerHTML =
+        `${escapeHtml(alertItem.device_id)} ${testBadge(alertItem.is_test)} · 报警 #${Number(alertItem.id)}`;
+      const rows = data.context_events.map(event => `
+        <tr class="${event.relation === 'trigger' ? 'event-trigger' : ''}">
+          <td><span class="relation ${event.relation === 'trigger' ? 'trigger' : ''}">${relationLabel(event.relation)}</span></td>
+          <td>${time(event.received_at)}</td>
+          <td>${escapeHtml(event.state)}</td>
+          <td>${pct(event.fall_probability)}</td>
+          <td>${Number(event.sequence)}</td>
+          <td>${escapeHtml(event.session_id)}</td>
+        </tr>`).join('');
+      document.querySelector('#alert-detail-body').innerHTML = `
+        <div class="detail-grid">
+          <div class="detail-item"><span>报警状态</span><strong>${escapeHtml(alertItem.status)}</strong></div>
+          <div class="detail-item"><span>触发分数 / 阈值</span><strong>${pct(trigger.fall_probability)} / ${pct(trigger.threshold)}</strong></div>
+          <div class="detail-item"><span>板端状态</span><strong>${escapeHtml(trigger.state)}</strong></div>
+          <div class="detail-item"><span>服务器接收</span><strong>${time(trigger.received_at)}</strong></div>
+          <div class="detail-item"><span>Session / Sequence</span><strong>${escapeHtml(trigger.session_id)} / ${Number(trigger.sequence)}</strong></div>
+          <div class="detail-item"><span>设备运行时间</span><strong>${duration(trigger.uptime_ms)}</strong></div>
+          <div class="detail-item"><span>模型</span><strong>${escapeHtml(trigger.model_version)}</strong></div>
+          <div class="detail-item"><span>Pipeline</span><strong>${escapeHtml(trigger.pipeline_version)}</strong></div>
+          <div class="detail-item"><span>确认信息</span><strong>${statusDetail}</strong></div>
+        </div>
+        <h2>同设备前后事件</h2>
+        <p class="detail-note">显示报警前 ${context.returned_before}/${context.available_before} 条、报警后 ${context.returned_after}/${context.available_after} 条；红色行为报警触发事件。不同设备的数据不会混入。</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>位置</th><th>接收时间</th><th>状态</th><th>分数</th><th>Sequence</th><th>Session</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+        <div class="detail-footer">
+          ${alertItem.status === 'OPEN' ? `<button onclick="acknowledge(${Number(alertItem.id)})">确认此报警</button>` : ''}
+          <button class="secondary" onclick="closeAlertDetail()">关闭</button>
+        </div>`;
+    }
+
+    async function loadAlertDetail(id) {
+      document.querySelector('#alert-detail-body').innerHTML = '<p class="muted">正在加载…</p>';
+      try {
+        const data = await getJson(`/api/v1/alerts/${id}/context?before=5&after=5`);
+        if (detailAlertId !== id) return;
+        renderAlertDetail(data);
+      } catch (error) {
+        document.querySelector('#alert-detail-body').innerHTML = `<p class="error">详情加载失败：${escapeHtml(error.message)}</p>`;
+      }
+    }
+
+    function showAlertDetail(id) {
+      detailAlertId = id;
+      const dialog = document.querySelector('#alert-detail-dialog');
+      if (!dialog.open) dialog.showModal();
+      loadAlertDetail(id);
+    }
+
+    function closeAlertDetail() {
+      document.querySelector('#alert-detail-dialog').close();
+      detailAlertId = null;
     }
 
     async function refresh() {
@@ -110,12 +211,20 @@
         method:'PATCH', headers:{'Content-Type':'application/json','X-API-Key':apiKey},
         body:JSON.stringify({acknowledged_by:'dashboard-user'})
       });
-      if (!response.ok) { alert(`确认失败：HTTP ${response.status}`); return; }
-      refresh();
+      if (!response.ok) {
+        if (response.status === 401) sessionStorage.removeItem('fall_api_key');
+        alert(`确认失败：HTTP ${response.status}`); return;
+      }
+      await refresh();
+      if (detailAlertId === id) await loadAlertDetail(id);
     }
 
     document.querySelector('#hide-tests').addEventListener('change', render);
     document.querySelector('#open-only').addEventListener('change', render);
+    document.querySelector('#alert-detail-dialog').addEventListener('close', () => { detailAlertId = null; });
+    document.querySelector('#alert-detail-dialog').addEventListener('click', event => {
+      if (event.target === event.currentTarget) closeAlertDetail();
+    });
     refresh(); setInterval(refresh, 5000);
   </script>
 </body>

@@ -20,7 +20,7 @@ DEVICE_OFFLINE_SECONDS = int(os.getenv("DEVICE_OFFLINE_SECONDS", "30"))
 app = FastAPI(
     title="IoT Fall Detection API",
     description="Nano performs inference; this server receives, stores and displays results.",
-    version="0.5.0",
+    version="0.6.0",
 )
 
 
@@ -53,6 +53,16 @@ class AcknowledgeRequest(BaseModel):
     acknowledged_by: str = Field(min_length=1, max_length=100)
 
 
+class ReviewRequest(BaseModel):
+    confirmed: bool = Field(strict=True)
+    updated_by: str = Field(min_length=1, max_length=100)
+
+
+class AlarmMarkRequest(BaseModel):
+    alarm_required: bool = Field(strict=True)
+    updated_by: str = Field(min_length=1, max_length=100)
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -81,6 +91,8 @@ def initialise_database() -> None:
             telemetry_event_id INTEGER NOT NULL UNIQUE, device_id TEXT NOT NULL,
             is_test INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'OPEN', created_at TEXT NOT NULL,
             acknowledged_at TEXT, acknowledged_by TEXT,
+            alarm_required INTEGER NOT NULL DEFAULT 0 CHECK(alarm_required IN (0, 1)),
+            alarm_marked_at TEXT, alarm_marked_by TEXT,
             FOREIGN KEY(telemetry_event_id) REFERENCES telemetry_events(id)
         );
         CREATE INDEX IF NOT EXISTS idx_events_device_received
@@ -89,6 +101,17 @@ def initialise_database() -> None:
             ON alerts(status, id DESC);
         """)
         conn.execute("PRAGMA journal_mode=WAL")
+        # Add manual alarm fields to existing Volume databases without rebuilding tables.
+        conn.execute("BEGIN IMMEDIATE")
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(alerts)")}
+        additions = {
+            "alarm_required": "INTEGER NOT NULL DEFAULT 0 CHECK(alarm_required IN (0, 1))",
+            "alarm_marked_at": "TEXT",
+            "alarm_marked_by": "TEXT",
+        }
+        for name, definition in additions.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE alerts ADD COLUMN {name} {definition}")
         conn.commit()
 
 
@@ -96,6 +119,8 @@ def to_dict(row: sqlite3.Row) -> dict:
     item = dict(row)
     if "is_test" in item:
         item["is_test"] = bool(item["is_test"])
+    if "alarm_required" in item:
+        item["alarm_required"] = bool(item["alarm_required"])
     return item
 
 
@@ -314,20 +339,61 @@ def alert_context(
     }
 
 
+def set_review_status(alert_id: int, confirmed: bool, updated_by: str) -> dict:
+    """Reviewing a record does not change its manual alarm marker or model result."""
+    with closing(db_connection()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        alert = conn.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
+        if alert is None:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        target_status = "ACKNOWLEDGED" if confirmed else "OPEN"
+        if alert["status"] == target_status:
+            return {"status": "unchanged", "alert": to_dict(alert)}
+        conn.execute("""
+            UPDATE alerts SET status=?, acknowledged_at=?, acknowledged_by=?
+            WHERE id=?
+        """, (target_status, now() if confirmed else None,
+              updated_by if confirmed else None, alert_id))
+        updated = conn.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
+        conn.commit()
+    return {"status": "updated", "alert": to_dict(updated)}
+
+
+@app.patch(
+    "/api/v1/alerts/{alert_id}/review",
+    dependencies=[Depends(require_api_key)],
+)
+def review_alert(alert_id: int, data: ReviewRequest):
+    return set_review_status(alert_id, data.confirmed, data.updated_by)
+
+
+@app.patch(
+    "/api/v1/alerts/{alert_id}/alarm-mark",
+    dependencies=[Depends(require_api_key)],
+)
+def mark_alarm(alert_id: int, data: AlarmMarkRequest):
+    """Store a human's alarm marker; this endpoint does not send notifications."""
+    with closing(db_connection()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        alert = conn.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
+        if alert is None:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        if bool(alert["alarm_required"]) == data.alarm_required:
+            return {"status": "unchanged", "alert": to_dict(alert)}
+        conn.execute("""
+            UPDATE alerts SET alarm_required=?, alarm_marked_at=?, alarm_marked_by=?
+            WHERE id=?
+        """, (int(data.alarm_required), now(), data.updated_by, alert_id))
+        updated = conn.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
+        conn.commit()
+    return {"status": "updated", "alert": to_dict(updated)}
+
+
 @app.patch(
     "/api/v1/alerts/{alert_id}/acknowledge",
     dependencies=[Depends(require_api_key)],
 )
 def acknowledge_alert(alert_id: int, data: AcknowledgeRequest):
-    with closing(db_connection()) as conn:
-        alert = conn.execute("SELECT status FROM alerts WHERE id=?", (alert_id,)).fetchone()
-        if alert is None:
-            raise HTTPException(status_code=404, detail="Alert not found")
-        if alert["status"] == "ACKNOWLEDGED":
-            return {"status": "already_acknowledged", "alert_id": alert_id}
-        conn.execute("""
-            UPDATE alerts SET status='ACKNOWLEDGED', acknowledged_at=?, acknowledged_by=?
-            WHERE id=?
-        """, (now(), data.acknowledged_by, alert_id))
-        conn.commit()
-    return {"status": "acknowledged", "alert_id": alert_id}
+    result = set_review_status(alert_id, True, data.acknowledged_by)
+    result_status = "already_acknowledged" if result["status"] == "unchanged" else "acknowledged"
+    return {"status": result_status, "alert_id": alert_id}

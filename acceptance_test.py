@@ -90,7 +90,70 @@ def main():
     code, latest = call(args.base_url, f"/api/v1/devices/{device_id}/latest")
     assert code == 200 and latest["detection_result"] == "FALL"
 
-    print("PASS: health, accepted, duplicate, NEW_ALARM, POSITIVE, alert context, API key, device status")
+    review_path = f"/api/v1/alerts/{alert_id}/review"
+    mark_path = f"/api/v1/alerts/{alert_id}/alarm-mark"
+    actor = {"updated_by": "acceptance-test"}
+    code, result = call(args.base_url, mark_path, method="PATCH",
+                        body=actor | {"alarm_required": True}, api_key="wrong-key")
+    assert code == 401
+    code, result = call(args.base_url, review_path, method="PATCH",
+                        body=actor | {"confirmed": True}, api_key="wrong-key")
+    assert code == 401
+
+    code, result = call(args.base_url, mark_path, method="PATCH",
+                        body=actor | {"alarm_required": True}, api_key=args.api_key)
+    assert code == 200 and result["alert"]["alarm_required"] is True
+    assert result["alert"]["status"] == "OPEN", "Alarm marker changed review status"
+    marked_at = result["alert"]["alarm_marked_at"]
+    code, repeated = call(args.base_url, mark_path, method="PATCH",
+                          body=actor | {"alarm_required": True}, api_key=args.api_key)
+    assert code == 200 and repeated["status"] == "unchanged"
+    assert repeated["alert"]["alarm_marked_at"] == marked_at
+
+    code, result = call(args.base_url, review_path, method="PATCH",
+                        body=actor | {"confirmed": True}, api_key=args.api_key)
+    assert code == 200 and result["alert"]["status"] == "ACKNOWLEDGED"
+    assert result["alert"]["alarm_required"] is True
+    assert result["alert"]["acknowledged_by"] == "acceptance-test"
+    code, result = call(args.base_url, review_path, method="PATCH",
+                        body=actor | {"confirmed": False}, api_key=args.api_key)
+    assert code == 200 and result["alert"]["status"] == "OPEN"
+    assert result["alert"]["alarm_required"] is True
+    assert result["alert"]["acknowledged_at"] is None
+    code, result = call(args.base_url, mark_path, method="PATCH",
+                        body=actor | {"alarm_required": False}, api_key=args.api_key)
+    assert code == 200 and result["alert"]["alarm_required"] is False
+    assert result["alert"]["status"] == "OPEN"
+
+    code, saved = call(args.base_url, f"/api/v1/alerts/{alert_id}/context")
+    assert code == 200 and saved["alert"]["alarm_required"] is False
+    assert saved["trigger_event"]["state"] == "NEW_ALARM"
+    assert saved["trigger_event"]["fall_probability"] == 0.88
+    code, refreshed = call(args.base_url, "/api/v1/alerts?limit=200")
+    assert code == 200
+    stored = next(item for item in refreshed if item["id"] == alert_id)
+    assert stored["status"] == "OPEN" and stored["alarm_required"] is False
+
+    code, legacy = call(args.base_url, f"/api/v1/alerts/{alert_id}/acknowledge",
+                        method="PATCH", body={"acknowledged_by": "acceptance-test"},
+                        api_key=args.api_key)
+    assert code == 200 and legacy["status"] == "acknowledged"
+    code, legacy = call(args.base_url, f"/api/v1/alerts/{alert_id}/acknowledge",
+                        method="PATCH", body={"acknowledged_by": "acceptance-test"},
+                        api_key=args.api_key)
+    assert code == 200 and legacy["status"] == "already_acknowledged"
+
+    for path, body in [(review_path, actor | {"confirmed": "true"}),
+                       (mark_path, actor | {"alarm_required": "true"})]:
+        code, _ = call(args.base_url, path, method="PATCH", body=body, api_key=args.api_key)
+        assert code == 422, "Boolean fields must reject string values"
+    for route, body in [("review", actor | {"confirmed": True}),
+                        ("alarm-mark", actor | {"alarm_required": True})]:
+        code, _ = call(args.base_url, f"/api/v1/alerts/999999999/{route}",
+                        method="PATCH", body=body, api_key=args.api_key)
+        assert code == 404
+
+    print("PASS: telemetry, deduplication, alert context, API key, device status, independent review/alarm toggles, persistence, legacy compatibility")
     print(f"Dashboard: {args.base_url.rstrip('/')}/dashboard")
     print(f"Docs: {args.base_url.rstrip('/')}/docs")
     print(f"Upload: {args.base_url.rstrip('/')}/api/v1/telemetry")

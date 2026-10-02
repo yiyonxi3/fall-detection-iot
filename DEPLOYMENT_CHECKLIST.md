@@ -2,7 +2,7 @@
 
 ## 1. 部署
 
-- 将 v0.5 文件提交到 GitHub 私有仓库。
+- 将 v0.6 文件提交到 GitHub 私有仓库。
 - Railway 选择 `Deploy from GitHub Repo`。
 - 确认 Railway 使用仓库根目录的 `Dockerfile`。
 - 设置变量：

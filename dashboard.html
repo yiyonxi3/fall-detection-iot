@@ -27,8 +27,12 @@
     th { color:#91a5c3; } button { color:white; background:#2563eb; border:0; border-radius:7px; padding:7px 10px; cursor:pointer; }
     button:disabled { background:#41516c; cursor:default; }
     button.secondary { background:#334155; }
+    button.reviewed { background:#15803d; }
+    button.manual-alarm { background:#b91c1c; }
     button.close { background:transparent; color:#b9c7dc; font-size:24px; line-height:1; padding:4px 8px; }
-    .actions { display:flex; gap:8px; align-items:center; }
+    .actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .actions button { white-space:nowrap; }
+    .status-stack { display:grid; gap:4px; }
     .controls { display:flex; gap:20px; flex-wrap:wrap; color:#b9c7dc; }
     .controls label { cursor:pointer; }
     #message { color:#fbbf24; min-height:20px; }
@@ -59,7 +63,7 @@
     <div id="stats" class="stats"></div>
     <section class="controls">
       <label><input id="hide-tests" type="checkbox"> 隐藏测试数据</label>
-      <label><input id="open-only" type="checkbox"> 只看未查看报警</label>
+      <label><input id="open-only" type="checkbox"> 只看未确认报警</label>
     </section>
     <section><h2>设备最新状态</h2><div id="devices" class="grid"></div></section>
     <section><h2>候选报警</h2><div class="table-wrap"><table>
@@ -82,10 +86,27 @@
     const time = value => value ? new Date(value).toLocaleString() : "—";
     const duration = value => value == null ? "—" : `${(Number(value) / 1000).toFixed(1)} 秒`;
     const testBadge = value => value ? '<span class="badge test">测试</span>' : '';
-    const alertStatusLabel = value => value === 'ACKNOWLEDGED' ? '已查看' : value === 'OPEN' ? '待查看' : escapeHtml(value);
+    const alertStatusLabel = value => value === 'ACKNOWLEDGED' ? '已确认' : value === 'OPEN' ? '未确认' : escapeHtml(value);
+    const alarmMarkLabel = value => value ? '已报警' : '未报警';
     let deviceData = [];
     let alertData = [];
     let detailAlertId = null;
+    let detailAlertData = null;
+    const pendingAlerts = new Set();
+
+    function actionButtons(item, includeDetails = true) {
+      const id = Number(item.id);
+      const reviewed = item.status === 'ACKNOWLEDGED';
+      const alarmRequired = Boolean(item.alarm_required);
+      const disabled = pendingAlerts.has(id) ? 'disabled' : '';
+      return `${includeDetails ? `<button class="secondary" onclick="showAlertDetail(${id})">详情</button>` : ''}
+        <button class="${reviewed ? 'reviewed' : 'secondary'}" ${disabled}
+          aria-pressed="${reviewed}" title="点击改为${reviewed ? '未确认' : '已确认'}"
+          onclick="setReview(${id}, ${!reviewed})">${alertStatusLabel(item.status)}</button>
+        <button class="${alarmRequired ? 'manual-alarm' : 'secondary'}" ${disabled}
+          aria-pressed="${alarmRequired}" title="点击改为${alarmRequired ? '未报警' : '已报警'}（人工标记）"
+          onclick="setAlarmMark(${id}, ${!alarmRequired})">${alarmMarkLabel(alarmRequired)}</button>`;
+    }
 
     async function getJson(url) {
       const response = await fetch(url);
@@ -104,7 +125,7 @@
           <div class="stat"><span class="muted">设备总数</span><strong>${devices.length}</strong></div>
           <div class="stat"><span class="muted">在线设备</span><strong>${online}</strong></div>
           <div class="stat"><span class="muted">离线设备</span><strong>${devices.length - online}</strong></div>
-          <div class="stat"><span class="muted">未查看报警</span><strong>${openAlerts}</strong></div>`;
+          <div class="stat"><span class="muted">未确认报警</span><strong>${openAlerts}</strong></div>`;
         document.querySelector('#devices').innerHTML = devices.length ? devices.map(item => `
           <article class="card ${item.state === 'NEW_ALARM' || item.state === 'POSITIVE' ? 'alarm' : ''} ${item.state === 'INVALID' ? 'invalid' : ''}">
             <div class="value">${escapeHtml(item.device_id)} ${testBadge(item.is_test)}
@@ -120,10 +141,9 @@
         document.querySelector('#alerts').innerHTML = alerts.length ? alerts.map(item => `
           <tr><td>${escapeHtml(item.device_id)} ${testBadge(item.is_test)}</td>
           <td>${pct(item.fall_probability)} / ${pct(item.threshold)}</td><td>${time(item.received_at)}</td>
-          <td>${alertStatusLabel(item.status)}</td><td><div class="actions">
-          <button class="secondary" onclick="showAlertDetail(${Number(item.id)})">详情</button>
-          <button ${item.status !== 'OPEN' ? 'disabled' : ''} onclick="acknowledge(${Number(item.id)})">${item.status === 'OPEN' ? '标记已查看' : '已查看'}</button>
-          </div></td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无候选报警。</td></tr>';
+          <td><div class="status-stack"><span>${alertStatusLabel(item.status)}</span>
+          <span class="muted">${alarmMarkLabel(item.alarm_required)}</span></div></td>
+          <td><div class="actions">${actionButtons(item)}</div></td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无候选报警。</td></tr>';
     }
 
     function relationLabel(relation) {
@@ -136,7 +156,10 @@
       const context = data.context;
       const statusDetail = alertItem.status === 'ACKNOWLEDGED'
         ? `${time(alertItem.acknowledged_at)} · ${escapeHtml(alertItem.acknowledged_by || '未知操作员')}`
-        : '尚未查看';
+        : '尚未确认查看';
+      const alarmDetail = alertItem.alarm_marked_at
+        ? `${time(alertItem.alarm_marked_at)} · ${escapeHtml(alertItem.alarm_marked_by || '未知操作员')}`
+        : '尚无人工标记记录';
       document.querySelector('#alert-detail-subtitle').innerHTML =
         `${escapeHtml(alertItem.device_id)} ${testBadge(alertItem.is_test)} · 报警 #${Number(alertItem.id)}`;
       const sessionCount = new Set(data.context_events.map(event => event.session_id)).size;
@@ -157,7 +180,8 @@
       }).join('');
       document.querySelector('#alert-detail-body').innerHTML = `
         <div class="detail-grid">
-          <div class="detail-item"><span>查看状态</span><strong>${alertStatusLabel(alertItem.status)} (${escapeHtml(alertItem.status)})</strong></div>
+          <div class="detail-item"><span>查看确认状态</span><strong>${alertStatusLabel(alertItem.status)} (${escapeHtml(alertItem.status)})</strong></div>
+          <div class="detail-item"><span>人工报警标记</span><strong>${alarmMarkLabel(alertItem.alarm_required)}</strong></div>
           <div class="detail-item"><span>触发分数 / 阈值</span><strong>${pct(trigger.fall_probability)} / ${pct(trigger.threshold)}</strong></div>
           <div class="detail-item"><span>板端状态</span><strong>${escapeHtml(trigger.state)}</strong></div>
           <div class="detail-item"><span>服务器接收</span><strong>${time(trigger.received_at)}</strong></div>
@@ -165,7 +189,8 @@
           <div class="detail-item"><span>设备运行时间</span><strong>${duration(trigger.uptime_ms)}</strong></div>
           <div class="detail-item"><span>模型</span><strong>${escapeHtml(trigger.model_version)}</strong></div>
           <div class="detail-item"><span>Pipeline</span><strong>${escapeHtml(trigger.pipeline_version)}</strong></div>
-          <div class="detail-item"><span>查看记录</span><strong>${statusDetail}</strong></div>
+          <div class="detail-item"><span>查看确认记录</span><strong>${statusDetail}</strong></div>
+          <div class="detail-item"><span>报警标记记录</span><strong>${alarmDetail}</strong></div>
         </div>
         <h2>同设备前后事件</h2>
         <p class="detail-note">显示报警前 ${context.returned_before}/${context.available_before} 条、报警后 ${context.returned_after}/${context.available_after} 条；红色行为报警触发事件。不同设备的数据不会混入。</p>
@@ -174,9 +199,9 @@
           <thead><tr><th>位置</th><th>接收时间</th><th>状态</th><th>分数</th><th>Sequence</th><th>Session</th></tr></thead>
           <tbody>${rows}</tbody>
         </table></div>
-        <p class="detail-note">“标记已查看”仅表示操作员已查看此记录，不代表确认发生跌倒或人员安全。</p>
-        <div class="detail-footer">
-          ${alertItem.status === 'OPEN' ? `<button onclick="acknowledge(${Number(alertItem.id)})">标记已查看</button>` : ''}
+        <p class="detail-note">“已确认”表示已查看此记录；“已报警”表示人工判断需要报警。两项可独立切换，仅保存标记，不会发送通知。“未报警”不表示排除跌倒。</p>
+        <div class="detail-footer actions">
+          ${actionButtons(alertItem, false)}
           <button class="secondary" onclick="closeAlertDetail()">关闭</button>
         </div>`;
     }
@@ -186,14 +211,17 @@
       try {
         const data = await getJson(`/api/v1/alerts/${id}/context?before=5&after=5`);
         if (detailAlertId !== id) return;
+        detailAlertData = data;
         renderAlertDetail(data);
       } catch (error) {
+        if (detailAlertId !== id) return;
         document.querySelector('#alert-detail-body').innerHTML = `<p class="error">详情加载失败：${escapeHtml(error.message)}</p>`;
       }
     }
 
     function showAlertDetail(id) {
       detailAlertId = id;
+      detailAlertData = null;
       const dialog = document.querySelector('#alert-detail-dialog');
       if (!dialog.open) dialog.showModal();
       loadAlertDetail(id);
@@ -202,6 +230,7 @@
     function closeAlertDetail() {
       document.querySelector('#alert-detail-dialog').close();
       detailAlertId = null;
+      detailAlertData = null;
     }
 
     async function refresh() {
@@ -214,27 +243,52 @@
       } catch (error) { document.querySelector('#message').textContent = `刷新失败：${error.message}`; }
     }
 
-    async function acknowledge(id) {
-      const confirmed = confirm(`将报警 #${Number(id)} 标记为已查看？\n\n此操作仅表示你已查看此记录，不代表确认发生跌倒或人员安全。当前页面不提供撤销功能。`);
-      if (!confirmed) return;
+    async function updateAlertMark(id, path, body, message) {
+      if (pendingAlerts.has(id)) return;
+      if (!confirm(message)) return;
       const apiKey = sessionStorage.getItem('fall_api_key') || prompt('请输入当前服务的 X-API-Key（仅在本机输入）');
       if (!apiKey) return;
       sessionStorage.setItem('fall_api_key', apiKey);
-      const response = await fetch(`/api/v1/alerts/${id}/acknowledge`, {
-        method:'PATCH', headers:{'Content-Type':'application/json','X-API-Key':apiKey},
-        body:JSON.stringify({acknowledged_by:'dashboard-user'})
-      });
-      if (!response.ok) {
-        if (response.status === 401) sessionStorage.removeItem('fall_api_key');
-        alert(`标记已查看失败：HTTP ${response.status}`); return;
+      pendingAlerts.add(id);
+      render();
+      if (detailAlertId === id && detailAlertData) renderAlertDetail(detailAlertData);
+      try {
+        const response = await fetch(`/api/v1/alerts/${id}/${path}`, {
+          method:'PATCH', headers:{'Content-Type':'application/json','X-API-Key':apiKey},
+          body:JSON.stringify({...body, updated_by:'dashboard-user'})
+        });
+        if (!response.ok) {
+          if (response.status === 401) sessionStorage.removeItem('fall_api_key');
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const result = await response.json();
+        // Apply the server result immediately, even if the following refresh fails.
+        alertData = alertData.map(item => item.id === id ? {...item, ...result.alert} : item);
+        if (detailAlertId === id && detailAlertData) detailAlertData.alert = result.alert;
+        await refresh();
+        if (detailAlertId === id) await loadAlertDetail(id);
+      } catch (error) {
+        alert(`状态更新失败：${error.message}`);
+      } finally {
+        pendingAlerts.delete(id);
+        render();
+        if (detailAlertId === id && detailAlertData) renderAlertDetail(detailAlertData);
       }
-      await refresh();
-      if (detailAlertId === id) await loadAlertDetail(id);
+    }
+
+    function setReview(id, confirmed) {
+      return updateAlertMark(id, 'review', {confirmed},
+        `将报警 #${Number(id)} 改为“${confirmed ? '已确认' : '未确认'}”？\n\n此状态表示是否已查看确认记录，不代表确认发生跌倒或人员安全，也不会改变人工报警标记。`);
+    }
+
+    function setAlarmMark(id, alarmRequired) {
+      return updateAlertMark(id, 'alarm-mark', {alarm_required:alarmRequired},
+        `将报警 #${Number(id)} 改为“${alarmMarkLabel(alarmRequired)}”？\n\n这是人工判断是否需要报警的标记，仅保存到系统，不会发送通知或触发蜂鸣器，也不会改变查看确认状态。`);
     }
 
     document.querySelector('#hide-tests').addEventListener('change', render);
     document.querySelector('#open-only').addEventListener('change', render);
-    document.querySelector('#alert-detail-dialog').addEventListener('close', () => { detailAlertId = null; });
+    document.querySelector('#alert-detail-dialog').addEventListener('close', () => { detailAlertId = null; detailAlertData = null; });
     document.querySelector('#alert-detail-dialog').addEventListener('click', event => {
       if (event.target === event.currentTarget) closeAlertDetail();
     });

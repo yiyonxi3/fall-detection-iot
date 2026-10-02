@@ -35,6 +35,15 @@
     .status-stack { display:grid; gap:4px; }
     .controls { display:flex; gap:20px; flex-wrap:wrap; color:#b9c7dc; }
     .controls label { cursor:pointer; }
+    .controls label:has(input[type=text]) { display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
+    input[type=text], select, textarea { box-sizing:border-box; color:#e5eefc; background:#0d1728;
+      border:1px solid #41516c; border-radius:7px; padding:8px; font:inherit; }
+    .note-editor { display:grid; gap:10px; margin:20px 0; }
+    .note-editor label { display:grid; gap:6px; }
+    .note-editor textarea { width:100%; min-height:90px; resize:vertical; }
+    .history-change { white-space:pre-wrap; overflow-wrap:anywhere; min-width:220px; }
+    .history-table { max-height:320px; overflow:auto; }
+    .table-wrap { overflow-x:auto; }
     #message { color:#fbbf24; min-height:20px; }
     dialog { width:min(980px,calc(100vw - 32px)); max-height:calc(100vh - 32px); padding:0; border:1px solid #334766;
       border-radius:16px; color:#e5eefc; background:#101c30; box-shadow:0 24px 80px #000a; }
@@ -64,6 +73,8 @@
     <section class="controls">
       <label><input id="hide-tests" type="checkbox"> 隐藏测试数据</label>
       <label><input id="open-only" type="checkbox"> 只看未确认报警</label>
+      <label>操作员名称：<input id="operator-name" type="text" maxlength="100" placeholder="建议填写组员编号" oninput="rememberOperator()"></label>
+      <span class="muted">名称由本人填写，用于记录操作，不是登录身份认证。</span>
     </section>
     <section><h2>设备最新状态</h2><div id="devices" class="grid"></div></section>
     <section><h2>候选报警</h2><div class="table-wrap"><table>
@@ -93,6 +104,35 @@
     let detailAlertId = null;
     let detailAlertData = null;
     const pendingAlerts = new Set();
+    const noteDrafts = new Map();
+    const categories = {UNASSESSED:'尚未判断', SIMULATED_TEST:'模拟测试',
+      SUSPECTED_FALSE_POSITIVE:'疑似误报', NEEDS_VERIFICATION:'需要联系核实', OTHER:'其他'};
+    const categoryLabel = value => categories[value] || String(value ?? '');
+
+    function rememberOperator() {
+      sessionStorage.setItem('fall_operator_name', document.querySelector('#operator-name').value.trim());
+    }
+
+    function captureNoteDraft() {
+      if (!detailAlertData || detailAlertId == null) return;
+      const noteInput = document.querySelector('#judgment-note');
+      const categoryInput = document.querySelector('#judgment-category');
+      if (!noteInput || !categoryInput) return;
+      const saved = detailAlertData.alert;
+      const previous = noteDrafts.get(detailAlertId);
+      noteDrafts.set(detailAlertId, {note:noteInput.value, category:categoryInput.value,
+        expected_revision:previous?.expected_revision ?? saved.note_revision ?? 0});
+    }
+
+    function historyChanges(item) {
+      const labels = {status:'查看确认', alarm_required:'人工报警',
+        judgment_category:'判断类别', judgment_note:'判断备注'};
+      const display = (key, value) => key === 'status' ? (value === 'ACKNOWLEDGED' ? '已确认' : '未确认')
+        : key === 'alarm_required' ? alarmMarkLabel(value)
+        : key === 'judgment_category' ? categoryLabel(value) : (value || '（空）');
+      return Object.entries(labels).filter(([key]) => item.before[key] !== item.after[key])
+        .map(([key,label]) => `${label}：${display(key,item.before[key])} → ${display(key,item.after[key])}`).join('\n');
+    }
 
     function actionButtons(item, includeDetails = true) {
       const id = Number(item.id);
@@ -160,6 +200,14 @@
       const alarmDetail = alertItem.alarm_marked_at
         ? `${time(alertItem.alarm_marked_at)} · ${escapeHtml(alertItem.alarm_marked_by || '未知操作员')}`
         : '尚无人工标记记录';
+      const draft = noteDrafts.get(Number(alertItem.id)) || {note:alertItem.judgment_note || '',
+        category:alertItem.judgment_category || 'UNASSESSED'};
+      const pending = pendingAlerts.has(Number(alertItem.id)) ? 'disabled' : '';
+      const operations = data.operations || [];
+      const historyRows = operations.map(item => `<tr>
+        <td>${time(item.operated_at)}</td><td>${escapeHtml(item.operated_by)}</td>
+        <td>${escapeHtml(({REVIEW:'查看确认',ALARM_MARK:'报警标记',NOTE:'判断备注'})[item.action] || item.action)}</td>
+        <td class="history-change">${escapeHtml(historyChanges(item))}</td></tr>`).join('');
       document.querySelector('#alert-detail-subtitle').innerHTML =
         `${escapeHtml(alertItem.device_id)} ${testBadge(alertItem.is_test)} · 报警 #${Number(alertItem.id)}`;
       const sessionCount = new Set(data.context_events.map(event => event.session_id)).size;
@@ -192,6 +240,28 @@
           <div class="detail-item"><span>查看确认记录</span><strong>${statusDetail}</strong></div>
           <div class="detail-item"><span>报警标记记录</span><strong>${alarmDetail}</strong></div>
         </div>
+        <div class="note-editor">
+          <h2>人工判断备注</h2>
+          <p class="detail-note">类别和备注只记录人工判断，不自动改变确认或报警标记。</p>
+          <label>操作员名称<input id="detail-operator-name" type="text" maxlength="100" ${pending}
+            value="${escapeHtml(document.querySelector('#operator-name').value)}" placeholder="建议填写组员编号"
+            oninput="document.querySelector('#operator-name').value=this.value; rememberOperator()"></label>
+          <p class="detail-note">备注和历史沿用页面的公开读取权限，请勿填写电话、住址或真实健康信息。</p>
+          <label>判断类别<select id="judgment-category" ${pending} onchange="captureNoteDraft()">
+            ${Object.entries(categories).map(([value,label]) => `<option value="${value}" ${draft.category === value ? 'selected' : ''}>${label}</option>`).join('')}
+          </select></label>
+          <label>判断原因<textarea id="judgment-note" maxlength="1000" ${pending} oninput="captureNoteDraft()" placeholder="例如：模拟测试；疑似误报；需要联系人员核实。">${escapeHtml(draft.note)}</textarea></label>
+          <div class="actions"><button ${pending} onclick="saveJudgmentNote(${Number(alertItem.id)})">保存备注</button>
+            <button class="secondary" ${pending} onclick="reloadJudgmentNote(${Number(alertItem.id)})">重新加载已保存备注</button></div>
+          <span class="muted">最多 1000 字符，需点击保存。${alertItem.note_updated_at
+            ? `最近保存：${time(alertItem.note_updated_at)} · ${escapeHtml(alertItem.note_updated_by)}` : '尚无备注保存记录。'}</span>
+        </div>
+        <details>
+          <summary>操作历史（最近 ${operations.length} 条 / 共 ${Number(data.operations_total || 0)} 条）</summary>
+          <p class="detail-note">新版本启用后记录操作，包括撤销和备注旧值；历史升级前的操作不会补造。操作员名称由本人填写。</p>
+          <div class="history-table"><table><thead><tr><th>操作时间</th><th>操作员</th><th>操作</th><th>前后变化</th></tr></thead>
+            <tbody>${historyRows || '<tr><td colspan="4" class="muted">尚无操作历史。</td></tr>'}</tbody></table></div>
+        </details>
         <h2>同设备前后事件</h2>
         <p class="detail-note">显示报警前 ${context.returned_before}/${context.available_before} 条、报警后 ${context.returned_after}/${context.available_after} 条；红色行为报警触发事件。不同设备的数据不会混入。</p>
         ${sessionCount > 1 ? `<p class="detail-note">本段记录包含 ${sessionCount} 个 Session，按服务器接收顺序排列；跨会话记录不能视为同一次连续运行。</p>` : ''}
@@ -220,6 +290,7 @@
     }
 
     function showAlertDetail(id) {
+      captureNoteDraft();
       detailAlertId = id;
       detailAlertData = null;
       const dialog = document.querySelector('#alert-detail-dialog');
@@ -228,6 +299,7 @@
     }
 
     function closeAlertDetail() {
+      captureNoteDraft();
       document.querySelector('#alert-detail-dialog').close();
       detailAlertId = null;
       detailAlertData = null;
@@ -246,29 +318,39 @@
     async function updateAlertMark(id, path, body, message) {
       if (pendingAlerts.has(id)) return;
       if (!confirm(message)) return;
+      const operator = document.querySelector('#operator-name').value.trim();
+      if (!operator || operator.length > 100) {
+        alert('请先填写操作员名称（1–100 字符），以便记录操作历史。');
+        return false;
+      }
+      rememberOperator();
       const apiKey = sessionStorage.getItem('fall_api_key') || prompt('请输入当前服务的 X-API-Key（仅在本机输入）');
       if (!apiKey) return;
       sessionStorage.setItem('fall_api_key', apiKey);
+      captureNoteDraft();
       pendingAlerts.add(id);
       render();
       if (detailAlertId === id && detailAlertData) renderAlertDetail(detailAlertData);
       try {
         const response = await fetch(`/api/v1/alerts/${id}/${path}`, {
           method:'PATCH', headers:{'Content-Type':'application/json','X-API-Key':apiKey},
-          body:JSON.stringify({...body, updated_by:'dashboard-user'})
+          body:JSON.stringify({...body, updated_by:operator})
         });
         if (!response.ok) {
           if (response.status === 401) sessionStorage.removeItem('fall_api_key');
-          throw new Error(`HTTP ${response.status}`);
+          throw new Error(response.status === 409 ? '备注已被其他操作修改。你的草稿已保留，请重新加载已保存备注并核对后再保存。' : `HTTP ${response.status}`);
         }
         const result = await response.json();
+        if (path === 'note') noteDrafts.delete(id);
         // Apply the server result immediately, even if the following refresh fails.
         alertData = alertData.map(item => item.id === id ? {...item, ...result.alert} : item);
         if (detailAlertId === id && detailAlertData) detailAlertData.alert = result.alert;
         await refresh();
         if (detailAlertId === id) await loadAlertDetail(id);
+        return true;
       } catch (error) {
         alert(`状态更新失败：${error.message}`);
+        return false;
       } finally {
         pendingAlerts.delete(id);
         render();
@@ -286,12 +368,48 @@
         `将报警 #${Number(id)} 改为“${alarmMarkLabel(alarmRequired)}”？\n\n这是人工判断是否需要报警的标记，仅保存到系统，不会发送通知或触发蜂鸣器，也不会改变查看确认状态。`);
     }
 
+    function saveJudgmentNote(id) {
+      if (detailAlertId !== id || pendingAlerts.has(id)) return;
+      captureNoteDraft();
+      const draft = noteDrafts.get(id);
+      if (!draft || Array.from(draft.note).length > 1000) {
+        alert('判断备注不能超过 1000 字符。'); return;
+      }
+      return updateAlertMark(id, 'note', draft,
+        `保存报警 #${Number(id)} 的判断类别和备注？\n\n这不会改变查看确认或人工报警标记。`);
+    }
+
+    async function reloadJudgmentNote(id) {
+      if (detailAlertId !== id || pendingAlerts.has(id)) return;
+      if (!confirm('重新加载已保存备注？当前未保存的草稿将被替换。')) return;
+      captureNoteDraft();
+      pendingAlerts.add(id);
+      render();
+      if (detailAlertData) renderAlertDetail(detailAlertData);
+      try {
+        const data = await getJson(`/api/v1/alerts/${id}/context?before=5&after=5`);
+        if (detailAlertId !== id) return;
+        noteDrafts.delete(id);
+        detailAlertData = data;
+        renderAlertDetail(data);
+      } catch (error) { alert(`重新加载失败，草稿已保留：${error.message}`); }
+      finally {
+        pendingAlerts.delete(id);
+        render();
+        if (detailAlertId === id && detailAlertData) renderAlertDetail(detailAlertData);
+      }
+    }
+
     document.querySelector('#hide-tests').addEventListener('change', render);
     document.querySelector('#open-only').addEventListener('change', render);
-    document.querySelector('#alert-detail-dialog').addEventListener('close', () => { detailAlertId = null; detailAlertData = null; });
+    document.querySelector('#alert-detail-dialog').addEventListener('close', () => {
+      if (document.querySelector('#alert-detail-dialog').open) return;
+      captureNoteDraft(); detailAlertId = null; detailAlertData = null;
+    });
     document.querySelector('#alert-detail-dialog').addEventListener('click', event => {
       if (event.target === event.currentTarget) closeAlertDetail();
     });
+    document.querySelector('#operator-name').value = sessionStorage.getItem('fall_operator_name') || '';
     refresh(); setInterval(refresh, 5000);
   </script>
 </body>

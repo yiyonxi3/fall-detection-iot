@@ -153,7 +153,37 @@ def main():
                         method="PATCH", body=body, api_key=args.api_key)
         assert code == 404
 
-    print("PASS: telemetry, deduplication, alert context, API key, device status, independent review/alarm toggles, persistence, legacy compatibility")
+    note_path = f"/api/v1/alerts/{alert_id}/note"
+    note_body = actor | {"category": "SIMULATED_TEST", "note": "受控模拟测试，需组员核实。",
+                         "expected_revision": 0}
+    code, _ = call(args.base_url, note_path, method="PATCH", body=note_body, api_key="wrong-key")
+    assert code == 401
+    code, noted = call(args.base_url, note_path, method="PATCH", body=note_body, api_key=args.api_key)
+    assert code == 200 and noted["alert"]["judgment_note"] == note_body["note"]
+    assert noted["alert"]["note_revision"] == 1
+    assert noted["alert"]["status"] == "ACKNOWLEDGED" and not noted["alert"]["alarm_required"]
+    code, unchanged = call(args.base_url, note_path, method="PATCH", body=note_body, api_key=args.api_key)
+    assert code == 200 and unchanged["status"] == "unchanged"
+    code, _ = call(args.base_url, note_path, method="PATCH",
+                   body=note_body | {"note": "过期的修改"}, api_key=args.api_key)
+    assert code == 409, "A stale note must not overwrite newer work"
+    for invalid in [note_body | {"category": "INVALID"}, note_body | {"note": "x" * 1001},
+                    note_body | {"updated_by": "   "}, note_body | {"expected_revision": "1"}]:
+        code, _ = call(args.base_url, note_path, method="PATCH", body=invalid, api_key=args.api_key)
+        assert code == 422
+    code, history = call(args.base_url, f"/api/v1/alerts/{alert_id}/operations")
+    assert code == 200 and len(history["items"]) == 6, "Repeats/failures must not create history"
+    assert [op["action"] for op in history["items"]] == ["NOTE", "REVIEW", "ALARM_MARK", "REVIEW", "REVIEW", "ALARM_MARK"]
+    assert history["items"][0]["before"]["judgment_note"] == ""
+    assert history["items"][0]["after"]["judgment_note"] == note_body["note"]
+    assert history["items"][3]["before"]["status"] == "ACKNOWLEDGED"
+    assert history["items"][3]["after"]["status"] == "OPEN", "Undo must remain in history"
+    assert all(op["operated_by"] == "acceptance-test" for op in history["items"])
+    code, saved = call(args.base_url, f"/api/v1/alerts/{alert_id}/context")
+    assert code == 200 and saved["operations_total"] == 6
+    assert saved["operations"] == history["items"]
+    assert saved["alert"]["judgment_category"] == "SIMULATED_TEST"
+    print("PASS: telemetry, deduplication, context, auth, independent marks, notes, revision conflict, operation history, undo, persistence, legacy compatibility")
     print(f"Dashboard: {args.base_url.rstrip('/')}/dashboard")
     print(f"Docs: {args.base_url.rstrip('/')}/docs")
     print(f"Upload: {args.base_url.rstrip('/')}/api/v1/telemetry")

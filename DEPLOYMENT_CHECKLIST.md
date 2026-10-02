@@ -2,7 +2,7 @@
 
 ## 1. 部署
 
-- 将 v0.6 文件提交到 GitHub 私有仓库。
+- 将 v0.7 文件提交到 GitHub 私有仓库。
 - Railway 选择 `Deploy from GitHub Repo`。
 - 确认 Railway 使用仓库根目录的 `Dockerfile`。
 - 设置变量：
@@ -47,10 +47,13 @@ Health:    https://<实际Railway域名>/api/v1/health
 
 ## 3. 持久化验收
 
+- 升级不需要删除数据库或 Volume；服务自动新增备注字段和历史表。
+- 在已知测试报警中填写组员编号，保存备注，独立切换确认/报警标记后查看操作历史。
+- 验证撤销操作仍保留前后值；历史不应补造升级前的操作。
 - 在 Dashboard 记录测试设备和报警数量。
 - 从 Railway Deployments 对当前服务执行 Redeploy。
 - 服务恢复后重新打开 Dashboard。
-- 确认重启前的记录仍存在。
+- 确认重启前的记录、判断备注、状态和操作历史仍存在。
 - 如果记录消失，检查 Volume 是否连接到正确服务、挂载路径是否为 `/data`，以及
   `FALL_DB_PATH` 是否为 `/data/fall_detection.db`。
 

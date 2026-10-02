@@ -2,15 +2,18 @@
 
 from contextlib import closing
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import secrets
 import sqlite3
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StringConstraints, model_validator
+
+OperatorName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
 
 DEFAULT_DB_PATH = Path(__file__).with_name("fall_detection.db")
 DB_PATH = Path(os.getenv("FALL_DB_PATH", str(DEFAULT_DB_PATH)))
@@ -20,7 +23,7 @@ DEVICE_OFFLINE_SECONDS = int(os.getenv("DEVICE_OFFLINE_SECONDS", "30"))
 app = FastAPI(
     title="IoT Fall Detection API",
     description="Nano performs inference; this server receives, stores and displays results.",
-    version="0.6.0",
+    version="0.7.0",
 )
 
 
@@ -50,17 +53,24 @@ class TelemetryRequest(BaseModel):
 
 
 class AcknowledgeRequest(BaseModel):
-    acknowledged_by: str = Field(min_length=1, max_length=100)
+    acknowledged_by: OperatorName
 
 
 class ReviewRequest(BaseModel):
     confirmed: bool = Field(strict=True)
-    updated_by: str = Field(min_length=1, max_length=100)
+    updated_by: OperatorName
 
 
 class AlarmMarkRequest(BaseModel):
     alarm_required: bool = Field(strict=True)
-    updated_by: str = Field(min_length=1, max_length=100)
+    updated_by: OperatorName
+
+
+class NoteRequest(BaseModel):
+    category: Literal["UNASSESSED", "SIMULATED_TEST", "SUSPECTED_FALSE_POSITIVE", "NEEDS_VERIFICATION", "OTHER"]
+    note: str = Field(max_length=1000)
+    expected_revision: int = Field(ge=0, strict=True)
+    updated_by: OperatorName
 
 
 def now() -> str:
@@ -108,10 +118,25 @@ def initialise_database() -> None:
             "alarm_required": "INTEGER NOT NULL DEFAULT 0 CHECK(alarm_required IN (0, 1))",
             "alarm_marked_at": "TEXT",
             "alarm_marked_by": "TEXT",
+            "judgment_category": "TEXT NOT NULL DEFAULT 'UNASSESSED'",
+            "judgment_note": "TEXT NOT NULL DEFAULT ''",
+            "note_revision": "INTEGER NOT NULL DEFAULT 0",
+            "note_updated_at": "TEXT",
+            "note_updated_by": "TEXT",
         }
         for name, definition in additions.items():
             if name not in columns:
                 conn.execute(f"ALTER TABLE alerts ADD COLUMN {name} {definition}")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_operations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alert_id INTEGER NOT NULL,
+                action TEXT NOT NULL, operated_at TEXT NOT NULL, operated_by TEXT NOT NULL,
+                before_json TEXT NOT NULL, after_json TEXT NOT NULL,
+                FOREIGN KEY(alert_id) REFERENCES alerts(id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_operations_alert ON alert_operations(alert_id, id DESC)")
         conn.commit()
 
 
@@ -137,6 +162,25 @@ def device_status(row: sqlite3.Row) -> dict:
         item["detection_result"] = "INVALID"
     else:
         item["detection_result"] = "FALL"
+    return item
+
+
+def record_operation(conn, alert_id, action, operated_at, operated_by, before, after):
+    """Append human-field snapshots in the SAME transaction as the alert update."""
+    fields = ("status", "acknowledged_at", "acknowledged_by", "alarm_required",
+              "alarm_marked_at", "alarm_marked_by", "judgment_category", "judgment_note",
+              "note_revision", "note_updated_at", "note_updated_by")
+    snapshots = [json.dumps({key: item[key] for key in fields}, ensure_ascii=False)
+                 for item in (to_dict(before), to_dict(after))]
+    conn.execute("""INSERT INTO alert_operations
+        (alert_id, action, operated_at, operated_by, before_json, after_json)
+        VALUES (?, ?, ?, ?, ?, ?)""", (alert_id, action, operated_at, operated_by, *snapshots))
+
+
+def operation_dict(row):
+    item = dict(row)
+    item["before"] = json.loads(item.pop("before_json"))
+    item["after"] = json.loads(item.pop("after_json"))
     return item
 
 
@@ -271,6 +315,7 @@ def alert_context(
 ):
     """Return one alert and nearby telemetry from the same device only."""
     with closing(db_connection()) as conn:
+        conn.execute("BEGIN")  # One read snapshot for the alert, context and history.
         alert_row = conn.execute(
             "SELECT * FROM alerts WHERE id=?",
             (alert_id,),
@@ -312,6 +357,13 @@ def alert_context(
                    WHERE device_id=? AND id>? ORDER BY id ASC LIMIT ?""",
                 (device_id, trigger_id, after),
             ).fetchall()
+        operation_rows = conn.execute(
+            "SELECT * FROM alert_operations WHERE alert_id=? ORDER BY id DESC LIMIT 50",
+            (alert_id,),
+        ).fetchall()
+        operation_total = conn.execute(
+            "SELECT COUNT(*) FROM alert_operations WHERE alert_id=?", (alert_id,),
+        ).fetchone()[0]
 
     alert = to_dict(alert_row)
     trigger_event = to_dict(trigger_row)
@@ -326,6 +378,8 @@ def alert_context(
         "alert": alert,
         "trigger_event": trigger_event,
         "context_events": context_events,
+        "operations": [operation_dict(row) for row in operation_rows],
+        "operations_total": operation_total,
         "context": {
             "requested_before": before,
             "requested_after": after,
@@ -349,12 +403,14 @@ def set_review_status(alert_id: int, confirmed: bool, updated_by: str) -> dict:
         target_status = "ACKNOWLEDGED" if confirmed else "OPEN"
         if alert["status"] == target_status:
             return {"status": "unchanged", "alert": to_dict(alert)}
+        changed_at = now()
         conn.execute("""
             UPDATE alerts SET status=?, acknowledged_at=?, acknowledged_by=?
             WHERE id=?
-        """, (target_status, now() if confirmed else None,
+        """, (target_status, changed_at if confirmed else None,
               updated_by if confirmed else None, alert_id))
         updated = conn.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
+        record_operation(conn, alert_id, "REVIEW", changed_at, updated_by, alert, updated)
         conn.commit()
     return {"status": "updated", "alert": to_dict(updated)}
 
@@ -380,13 +436,54 @@ def mark_alarm(alert_id: int, data: AlarmMarkRequest):
             raise HTTPException(status_code=404, detail="Alert not found")
         if bool(alert["alarm_required"]) == data.alarm_required:
             return {"status": "unchanged", "alert": to_dict(alert)}
+        changed_at = now()
         conn.execute("""
             UPDATE alerts SET alarm_required=?, alarm_marked_at=?, alarm_marked_by=?
             WHERE id=?
-        """, (int(data.alarm_required), now(), data.updated_by, alert_id))
+        """, (int(data.alarm_required), changed_at, data.updated_by, alert_id))
         updated = conn.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
+        record_operation(conn, alert_id, "ALARM_MARK", changed_at, data.updated_by, alert, updated)
         conn.commit()
     return {"status": "updated", "alert": to_dict(updated)}
+
+
+@app.patch("/api/v1/alerts/{alert_id}/note", dependencies=[Depends(require_api_key)])
+def update_note(alert_id: int, data: NoteRequest):
+    with closing(db_connection()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        alert = conn.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
+        if alert is None:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        if data.category == alert["judgment_category"] and data.note == alert["judgment_note"]:
+            return {"status": "unchanged", "alert": to_dict(alert)}
+        if data.expected_revision != alert["note_revision"]:
+            raise HTTPException(status_code=409, detail="Note changed; reload before saving")
+        changed_at = now()
+        conn.execute("""UPDATE alerts SET judgment_category=?, judgment_note=?,
+            note_revision=note_revision+1, note_updated_at=?, note_updated_by=? WHERE id=?""",
+            (data.category, data.note, changed_at, data.updated_by, alert_id))
+        updated = conn.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
+        record_operation(conn, alert_id, "NOTE", changed_at, data.updated_by, alert, updated)
+        conn.commit()
+    return {"status": "updated", "alert": to_dict(updated)}
+
+
+@app.get("/api/v1/alerts/{alert_id}/operations")
+def operation_history(alert_id: int, limit: int = Query(50, ge=1, le=200),
+                      before_id: int | None = Query(None, ge=1)):
+    with closing(db_connection()) as conn:
+        if conn.execute("SELECT 1 FROM alerts WHERE id=?", (alert_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        query = "SELECT * FROM alert_operations WHERE alert_id=?"
+        params = [alert_id]
+        if before_id is not None:
+            query += " AND id<?"
+            params.append(before_id)
+        rows = conn.execute(query + " ORDER BY id DESC LIMIT ?", [*params, limit + 1]).fetchall()
+    has_more = len(rows) > limit
+    items = [operation_dict(row) for row in rows[:limit]]
+    return {"items": items, "has_more": has_more,
+            "next_before_id": items[-1]["id"] if has_more else None}
 
 
 @app.patch(

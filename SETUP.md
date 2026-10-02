@@ -186,6 +186,42 @@ py test_core_evidence.py --db-dir "$env:TEMP\fall-core-isolated-tests"
 事务回滚。测试不能证明真实跌倒识别率、误报率改善或通知送达。下一阶段需要受控数据与
 人工标注，以及原始 IMU/采样诊断支持；暂不改既有固件或要求真人摔倒。
 
+## 疑似事件关联与证据完整性（v0.9）
+
+新增 `incident_engine.py`，在已有窗口模型之上整理疑似事件。每条 `NEW_ALARM` 仍建立并保留原候选，
+`POSITIVE` 不新增候选。同设备、同 Session、同配置（模型、pipeline、阈值、测试标记），板端时间
+位于首候选起 10 秒的固定窗口内，并且接收间隔未超过 `DEVICE_OFFLINE_SECONDS`，才允许关联。
+不同设备/会话/配置、期间会话变化、乱序迟到候选或接收间隔过长均保守地分开；不重新合并已有事件。
+10 秒固定窗口不随新候选滚动延长。时间关联并不能确定是否同一次实际动作。
+
+新增 `incidents`、`incident_alerts`、`incident_meta` 表。首次升级按历史接收顺序重建关联，来源为
+`reconstructed`；以后为 `live_ingest`。不删除原表、不改人工字段。遥测、候选、证据和关联同事务提交。
+人工确认、报警标记、备注和历史仍针对原候选；页面按候选汇总事件查看进度，所有候选已查看才显示
+`REVIEWED`，它只表示查看进度，不能当作真实跌倒核实结论。
+
+事件证据覆盖首候选起至最后候选后 10 秒的有效板端时间观察：`COLLECTING` 表示收集中，`OBSERVED`
+表示已经收到后观察范围且未发现本规则定义的缺口，`INCOMPLETE` 表示缺口需要检查。INVALID、配置变化、
+有效接收点板端间隔超过 7.5 秒、相对接收滞后或超过离线时限无有效时间推进都会产生明确原因。
+这些均为工程规则，`OBSERVED` 不是完整原始采样、更不证明人员安全。已完成历史观察不会因为后来离线
+而被改判；当前监测状态另行显示。GET 根据查询时间显示超时，但不写数据库；没有报文和页面查询时，
+当前版本不会运行后台通知或定时告警。超时和有效推进间隔以 `DEVICE_OFFLINE_SECONDS` 为准。
+
+接口：`GET /api/v1/incidents`（支持 `device_id`、`hide_tests`、`open_only`、`limit`、`before_id`），
+`GET /api/v1/incidents/{id}`。均沿用公开只读权限；人工写操作沿用已有鉴权接口。
+Dashboard 默认显示事件，原始候选列表可展开；事件详情链接到各候选的证据、人工操作和历史，支持下载 JSON。
+页面可加载最近 200 个匹配事件；更早记录仍保存在数据库，可通过接口 `before_id` 分页查询。
+
+隔离验证与三场景演示（在仓库目录执行，示例路径需替换为本次工作目录）：
+
+```powershell
+& '.\.venv\Scripts\python.exe' '.\test_incidents.py' --db-dir 'C:\path\to\work\incident-tests'
+& '.\.venv\Scripts\python.exe' '.\replay_incidents.py' --work-dir 'C:\path\to\work\replays' --output-dir 'C:\path\to\outputs'
+node '.\test_incident_frontend.cjs' '.\dashboard.html' 'C:\path\to\outputs\incident-replay-demo.html'
+```
+
+回放生成独立 UUID 测试库、可离线打开的 `incident-replay-demo.html` 和 `incident-replay-results.json`。
+这验证软件关联与缺口规则，不用于宣称真实误报减少、检出率提高或通知送达。此版本没有外部通知功能。
+
 ## 云端配置
 
 生产部署必须设置一个足够长且随机的 `FALL_API_KEY`。Nano 通过请求头

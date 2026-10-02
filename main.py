@@ -10,6 +10,7 @@ import sqlite3
 from typing import Annotated, Literal
 
 import event_evidence
+import incident_engine
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, StringConstraints, model_validator
@@ -24,7 +25,7 @@ DEVICE_OFFLINE_SECONDS = int(os.getenv("DEVICE_OFFLINE_SECONDS", "30"))
 app = FastAPI(
     title="IoT Fall Detection API",
     description="Nano performs inference; this server receives, stores and displays results.",
-    version="0.8.0",
+    version="0.9.0",
 )
 
 
@@ -139,6 +140,7 @@ def initialise_database() -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_operations_alert ON alert_operations(alert_id, id DESC)")
         event_evidence.initialise(conn)
+        incident_engine.initialise(conn, DEVICE_OFFLINE_SECONDS)
         conn.commit()
 
 
@@ -253,11 +255,50 @@ def receive_telemetry(data: TelemetryRequest, response: Response):
             """, (cursor.lastrowid, data.device_id, int(data.is_test), received_at))
         event = conn.execute("SELECT * FROM telemetry_events WHERE id=?", (cursor.lastrowid,)).fetchone()
         event_evidence.ingest(conn, event)
+        incident_id = incident_engine.ingest(conn, event, DEVICE_OFFLINE_SECONDS)
         conn.commit()
 
     return {"status": "accepted", "device_id": data.device_id,
             "session_id": data.session_id, "sequence": data.sequence,
-            "alert_created": alert_created, "server_received_at": received_at}
+            "alert_created": alert_created, "incident_id": incident_id,
+            "server_received_at": received_at}
+
+
+@app.get("/api/v1/incidents")
+def list_incidents(device_id: str | None = None, hide_tests: bool = False,
+                   open_only: bool = False, limit: int = Query(50, ge=1, le=200),
+                   before_id: int | None = Query(None, ge=1)):
+    conditions, params = [], []
+    if device_id:
+        conditions.append("i.device_id=?"); params.append(device_id)
+    if before_id is not None:
+        conditions.append("i.id<?"); params.append(before_id)
+    if hide_tests:
+        conditions.append("a.is_test=0")
+    if open_only:
+        conditions.append("EXISTS (SELECT 1 FROM incident_alerts m JOIN alerts x ON x.id=m.alert_id WHERE m.incident_id=i.id AND x.status='OPEN')")
+    query = "SELECT i.id FROM incidents i JOIN alerts a ON a.id=i.first_alert_id"
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY i.id DESC LIMIT ?"; params.append(limit)
+    with closing(db_connection()) as conn:
+        conn.execute("BEGIN")
+        stamp = now()
+        rows = conn.execute(query, params).fetchall()
+        return [incident_engine.read(conn, row["id"], stamp) for row in rows]
+
+
+@app.get("/api/v1/incidents/{incident_id}")
+def incident_detail(incident_id: int):
+    with closing(db_connection()) as conn:
+        conn.execute("BEGIN")
+        stamp = now()
+        result = incident_engine.read(conn, incident_id, stamp)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Incident not found")
+        result["current_monitoring"] = event_evidence.reporting_health(
+            conn, result["device_id"], stamp, DEVICE_OFFLINE_SECONDS)
+        return result
 
 
 @app.get("/api/v1/devices/{device_id}/latest")

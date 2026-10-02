@@ -78,16 +78,28 @@
     <div id="stats" class="stats"></div>
     <section class="controls">
       <label><input id="hide-tests" type="checkbox"> 隐藏测试数据</label>
-      <label><input id="open-only" type="checkbox"> 只看未确认报警</label>
+      <label><input id="open-only" type="checkbox"> 只看含未确认候选的事件</label>
       <label>操作员名称：<input id="operator-name" type="text" maxlength="100" placeholder="建议填写组员编号" oninput="rememberOperator()"></label>
       <span class="muted">名称由本人填写，用于记录操作，不是登录身份认证。</span>
     </section>
     <section><h2>设备最新状态</h2><div id="devices" class="grid"></div></section>
-    <section><h2>候选报警</h2><div class="table-wrap"><table>
+    <section><h2>疑似事件</h2>
+      <p class="detail-note">同设备、同会话、同配置，距首个候选 10 秒内关联。时间关联不确认同一次动作或真实跌倒；所有原始候选保留。</p>
+      <div id="incidents" class="grid"></div>
+      <p id="incident-page-note" class="detail-note"></p>
+      <button id="incident-more" class="secondary" onclick="loadMoreIncidents()">加载更早事件</button>
+    </section>
+    <section><details><summary>原始候选报警（最近 50 条）</summary><div class="table-wrap"><table>
       <thead><tr><th>设备</th><th>分数 / 阈值</th><th>接收时间</th><th>状态</th><th>操作</th></tr></thead>
       <tbody id="alerts"></tbody>
-    </table></div></section>
+    </table></div></details></section>
   </main>
+  <dialog id="incident-detail-dialog" aria-labelledby="incident-detail-title">
+    <div class="detail-shell"><div class="detail-head">
+      <h2 id="incident-detail-title">疑似事件详情</h2>
+      <button type="button" class="close" aria-label="关闭事件详情" onclick="closeIncidentDetail()">×</button>
+    </div><div id="incident-detail-body"></div></div>
+  </dialog>
   <dialog id="alert-detail-dialog" aria-labelledby="alert-detail-title">
     <div class="detail-shell">
       <div class="detail-head">
@@ -107,6 +119,13 @@
     const alarmMarkLabel = value => value ? '已报警' : '未报警';
     let deviceData = [];
     let alertData = [];
+    let incidentData = [];
+    let incidentLimit = 50;
+    let incidentMayHaveMore = true;
+    let incidentLoading = false;
+    let detailIncidentId = null;
+    let detailIncidentData = null;
+    let incidentDetailRequestId = 0;
     let detailAlertId = null;
     let detailAlertData = null;
     const pendingAlerts = new Set();
@@ -127,6 +146,117 @@
       RECEIVED_REPORT_GAP:'收到的相邻记录存在超过 7.5 秒的板端时间间隔（并非 IMU 丢样结论）。',
       EVIDENCE_POINTS_TRUNCATED:'证据展示最多 200 点，当前已截断。',DEVICE_ORDER_INCONSISTENT:'板端时间与序号顺序不一致。',
       OUT_OF_ORDER_RECEIPT:'网络接收顺序与板端顺序不同，可能为排队或迟到数据。',EARLY_SESSION_TRIGGER:'触发发生在会话早期，触发前观察不足。'};
+    const incidentEvidenceLabels = {COLLECTING:'正在收集后续证据',OBSERVED:'后观察范围已到达',INCOMPLETE:'证据有缺口，需要检查'};
+    const incidentReasonLabels = {POST_REPORT_TIMEOUT:'后观察期间，有效板端时间推进超过服务配置时限仍未到达。',
+      SESSION_CHANGED_BEFORE_HORIZON:'后观察范围完成前设备会话发生变化。',CONFIGURATION_CHANGED:'观察期间模型、阈值、预处理或测试标记变化。',
+      INVALID_REPORT:'观察期间收到 INVALID 状态。',RECEIVED_REPORT_GAP:'相邻有效接收点的板端时间间隔超过 7.5 秒。',
+      RELATIVE_DELAY_SUSPECTED:'服务器接收时间相对板端时间明显滞后，超过服务配置时限。'};
+    const associationLabels = {FIRST_CANDIDATE:'首个候选创建事件',SAME_SESSION_CONFIG_WITHIN_ANCHOR_10S:'同会话、同配置，距首个候选不超过 10 秒',
+      OUTSIDE_ANCHOR_WINDOW_OR_LATE:'超出首候选时间窗，或迟到于事件起点',CONFIGURATION_BOUNDARY:'配置变化，单独建立事件',
+      SESSION_BOUNDARY:'期间发生会话变化，单独建立事件',RECEIPT_WINDOW_EXPIRED:'接收间隔过长，单独建立事件',
+      LATE_OUT_OF_ORDER_CANDIDATE:'候选迟于较新的板端记录到达，保留为独立事件'};
+
+    function incidentQuery(limit) {
+      return `/api/v1/incidents?limit=${limit}&hide_tests=${document.querySelector('#hide-tests').checked}&open_only=${document.querySelector('#open-only').checked}`;
+    }
+
+    function incidentEvidenceHtml(item) {
+      const evidence = item.evidence;
+      const stale = !refreshSucceeded || lastSuccessfulRefreshMs == null || Date.now()-lastSuccessfulRefreshMs > 30000;
+      return `<div class="monitor-note ${evidence.state === 'INCOMPLETE' ? 'unavailable' : evidence.state === 'OBSERVED' ? 'receiving' : ''}">
+        <strong>${escapeHtml(incidentEvidenceLabels[evidence.state] || evidence.state)}</strong>
+        <div>${evidence.post_horizon_reached ? '已收到最后候选之后至少 10 秒的板端时间；只代表收到的窗口证据范围。' : '尚未完成最后候选后 10 秒的有效板端时间观察。'}</div>
+        ${evidence.reasons.map(code=>`<div>• ${escapeHtml(incidentReasonLabels[code] || code)}</div>`).join('')}
+        ${stale ? '<div>页面数据已过期，证据收集进度等待刷新。</div>' : ''}</div>`;
+    }
+
+    function renderIncidents() {
+      const hideTests = document.querySelector('#hide-tests').checked;
+      const openOnly = document.querySelector('#open-only').checked;
+      const items = incidentData.filter(item=>(!hideTests || !item.is_test) && (!openOnly || item.review_state !== 'REVIEWED'));
+      document.querySelector('#incidents').innerHTML = items.length ? items.map(item=>`<article class="card ${item.requires_evidence_check ? 'invalid' : ''}">
+        <div class="value">${escapeHtml(item.incident_key)} ${testBadge(item.is_test)}</div>
+        <div class="row"><span>设备</span><span>${escapeHtml(item.device_id)}</span></div>
+        <div class="row"><span>候选观察</span><span>${item.candidate_count > 1 ? '多候选疑似' : '单候选疑似'} · ${Number(item.candidate_count)} 条</span></div>
+        <div class="row"><span>最高窗口分数</span><span>${pct(item.peak_score)}</span></div>
+        <div class="row"><span>首个接收</span><span>${time(item.created_at)}</span></div>
+        <div class="row"><span>查看确认进度</span><span>${Number(item.reviewed_count)} / ${Number(item.candidate_count)}</span></div>
+        <div class="row"><span>人工需要报警标记</span><span>${Number(item.alarm_marked_count)} 条</span></div>
+        ${incidentEvidenceHtml(item)}
+        <p class="detail-note">${item.source === 'reconstructed' ? '由历史上报重建' : '实时关联'} · 多候选不等于已确认跌倒。</p>
+        <button class="secondary" onclick="showIncidentDetail(${Number(item.id)})">查看事件与核查候选</button>
+      </article>`).join('') : '<p class="muted">当前筛选下没有疑似事件。</p>';
+      document.querySelector('#incident-page-note').textContent = `已加载 ${incidentData.length} 个事件；原始候选全部保留。查看确认仅表示记录已被查看，不能据此判断人员安全。`;
+      document.querySelector('#incident-more').disabled = incidentLoading || !incidentMayHaveMore || incidentLimit >= 200;
+      document.querySelector('#incident-more').textContent = incidentLoading ? '加载中…' : incidentLimit >= 200 ? '已加载最近 200 个事件' : incidentMayHaveMore ? '加载更早事件' : '已加载全部匹配事件';
+    }
+
+    async function loadMoreIncidents() {
+      if (incidentLoading || incidentLimit >= 200 || !incidentMayHaveMore) return;
+      incidentLoading = true; incidentLimit = Math.min(200,incidentLimit+50); renderIncidents();
+      try { if (refreshInFlight) await refreshInFlight; await refresh(); }
+      finally { incidentLoading = false; renderIncidents(); }
+    }
+
+    function renderIncidentDetail(item) {
+      document.querySelector('#incident-detail-body').innerHTML = `<p class="detail-note">${escapeHtml(item.incident_key)} · ${escapeHtml(item.device_id)} · Session ${escapeHtml(item.session_id)}</p>
+        <div class="detail-grid"><div class="detail-item"><span>关联候选</span><strong>${Number(item.candidate_count)} 条</strong></div>
+          <div class="detail-item"><span>最高窗口分数</span><strong>${pct(item.peak_score)}</strong></div>
+          <div class="detail-item"><span>板端候选时间跨度</span><strong>${duration(item.last_uptime_ms-item.first_uptime_ms)}</strong></div>
+          <div class="detail-item"><span>判断规则</span><strong>首候选起 10 秒固定窗口</strong></div></div>
+        ${incidentEvidenceHtml(item)}
+        <p class="detail-note">${item.evidence.first_post_candidate_report ? `最后候选后首个有效接收：${escapeHtml(item.evidence.first_post_candidate_report.state)} / ${pct(item.evidence.first_post_candidate_report.score)}。分数回落不确认人员安全。` : '尚无最后候选后的有效接收记录。'}</p>
+        <h2>原始候选与人工核查</h2><div class="table-wrap"><table><thead><tr><th>候选</th><th>板端时间 / 分数</th><th>关联依据</th><th>查看 / 报警标记</th><th>判断备注</th><th>操作</th></tr></thead><tbody>
+        ${item.candidates.map(candidate=>`<tr><td>#${Number(candidate.id)}</td><td>${duration(candidate.uptime_ms)} / ${pct(candidate.fall_probability)}</td>
+          <td>${escapeHtml(associationLabels[candidate.relation_reason] || candidate.relation_reason)}</td>
+          <td>${alertStatusLabel(candidate.status)} / ${alarmMarkLabel(candidate.alarm_required)}</td>
+          <td>${escapeHtml(categoryLabel(candidate.judgment_category))}<br>${escapeHtml(candidate.judgment_note)}</td>
+          <td><button class="secondary" onclick="openIncidentCandidate(${Number(candidate.id)})">核查候选</button></td></tr>`).join('')}</tbody></table></div>
+        <p class="detail-note">人工确认、需要报警标记、备注与操作历史沿用每条候选的记录。事件查看进度按候选汇总；不会向其他候选传播人工结论。</p>
+        ${monitoringHtml({monitoring:item.current_monitoring})}
+        <p class="detail-note">以上监测状态是当前查询结果；事件证据是历史观察。已经完成的历史观察不会因后来设备离线而变成中断。</p>
+        <button class="secondary" onclick="downloadIncident(${Number(item.id)})">下载疑似事件 JSON</button>`;
+    }
+
+    async function loadIncidentDetail(id) {
+      const requestId = ++incidentDetailRequestId;
+      try {
+        const item = await getJson(`/api/v1/incidents/${id}`);
+        if (detailIncidentId === id && requestId === incidentDetailRequestId) {
+          detailIncidentData = item; renderIncidentDetail(item);
+        }
+      } catch(error) {
+        if (detailIncidentId === id && requestId === incidentDetailRequestId) {
+          detailIncidentData = null;
+          document.querySelector('#incident-detail-body').innerHTML = `<p class="error">事件详情加载失败：${escapeHtml(error.message)}</p>`;
+        }
+      }
+    }
+
+    function showIncidentDetail(id) {
+      detailIncidentId = id;
+      detailIncidentData = null;
+      document.querySelector('#incident-detail-body').innerHTML = '<p class="muted">正在加载…</p>';
+      const dialog = document.querySelector('#incident-detail-dialog');
+      if (!dialog.open) dialog.showModal();
+      loadIncidentDetail(id);
+    }
+
+    function closeIncidentDetail() {
+      detailIncidentId = null; detailIncidentData = null; ++incidentDetailRequestId;
+      document.querySelector('#incident-detail-dialog').close();
+    }
+
+    function openIncidentCandidate(id) { closeIncidentDetail(); showAlertDetail(id); }
+
+    async function downloadIncident(id) {
+      try {
+        const data = await getJson(`/api/v1/incidents/${id}`);
+        const url = URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));
+        const link = document.createElement('a'); link.href=url; link.download=`incident-${Number(id)}.json`;
+        link.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+      } catch(error) { alert(`事件下载失败：${error.message}`); }
+    }
 
     function monitoringHtml(item) {
       const monitoring = item.monitoring || {status:'UNKNOWN'};
@@ -233,17 +363,19 @@
     }
 
     function render() {
+        renderIncidents();
+        if (detailIncidentId != null && detailIncidentData) renderIncidentDetail(detailIncidentData);
         const hideTests = document.querySelector('#hide-tests').checked;
         const openOnly = document.querySelector('#open-only').checked;
         const devices = deviceData.filter(item => !hideTests || !item.is_test);
         const alerts = alertData.filter(item => (!hideTests || !item.is_test) && (!openOnly || item.status === 'OPEN'));
         const online = devices.filter(item => item.connectivity === 'ONLINE').length;
-        const openAlerts = alerts.filter(item => item.status === 'OPEN').length;
+        const pendingIncidents = incidentData.filter(item => (!hideTests || !item.is_test) && item.review_state !== 'REVIEWED').length;
         document.querySelector('#stats').innerHTML = `
           <div class="stat"><span class="muted">设备总数</span><strong>${devices.length}</strong></div>
           <div class="stat"><span class="muted">在线设备</span><strong>${online}</strong></div>
           <div class="stat"><span class="muted">离线设备</span><strong>${devices.length - online}</strong></div>
-          <div class="stat"><span class="muted">未确认报警</span><strong>${openAlerts}</strong></div>`;
+          <div class="stat"><span class="muted">待查看事件（已加载）</span><strong>${pendingIncidents}</strong></div>`;
         document.querySelector('#devices').innerHTML = devices.length ? devices.map(item => `
           <article class="card ${item.state === 'NEW_ALARM' || item.state === 'POSITIVE' ? 'alarm' : ''} ${item.state === 'INVALID' ? 'invalid' : ''}">
             <div class="value">${escapeHtml(item.device_id)} ${testBadge(item.is_test)}
@@ -396,15 +528,17 @@
     async function performRefresh(requestId) {
       try {
         const data = await Promise.all([
-          getJson('/api/v1/devices'), getJson('/api/v1/alerts?limit=50')
+          getJson('/api/v1/devices'), getJson('/api/v1/alerts?limit=50'), getJson(incidentQuery(incidentLimit))
         ]);
         if (requestId !== refreshRequestId) return;
         deviceData = data[0];
         // Keep a successful local write when an earlier polling GET finishes later.
         alertData = data[1].map(item => pendingAlerts.has(item.id)
           ? {...item,...alertData.find(current=>current.id === item.id)} : item);
+        incidentData = data[2]; incidentMayHaveMore = incidentData.length === incidentLimit;
         lastSuccessfulRefreshMs=Date.now(); refreshSucceeded=true;
         render();
+        if (detailIncidentId != null) loadIncidentDetail(detailIncidentId);
         document.querySelector('#message').textContent = `最后刷新：${new Date().toLocaleTimeString()}`;
       } catch (error) {
         if (requestId !== refreshRequestId) return;
@@ -498,8 +632,19 @@
       }
     }
 
-    document.querySelector('#hide-tests').addEventListener('change', render);
-    document.querySelector('#open-only').addEventListener('change', render);
+    async function changeIncidentFilters() {
+      incidentLimit=50; render();
+      if (refreshInFlight) { refreshRequestId++; await refreshInFlight; }
+      await refresh();
+    }
+    document.querySelector('#hide-tests').addEventListener('change', changeIncidentFilters);
+    document.querySelector('#open-only').addEventListener('change', changeIncidentFilters);
+    document.querySelector('#incident-detail-dialog').addEventListener('close', () => {
+      if (!document.querySelector('#incident-detail-dialog').open) { detailIncidentId=null; detailIncidentData=null; ++incidentDetailRequestId; }
+    });
+    document.querySelector('#incident-detail-dialog').addEventListener('click', event => {
+      if (event.target === event.currentTarget) closeIncidentDetail();
+    });
     document.querySelector('#alert-detail-dialog').addEventListener('close', () => {
       if (document.querySelector('#alert-detail-dialog').open) return;
       captureNoteDraft(); detailAlertId = null; detailAlertData = null;

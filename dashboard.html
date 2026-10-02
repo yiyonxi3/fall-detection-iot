@@ -62,6 +62,12 @@
     .relation.trigger { background:#b91c1c; }
     .detail-footer { display:flex; justify-content:flex-end; gap:10px; margin-top:16px; }
     .error { color:#fca5a5; }
+    .monitor-note { padding:10px; margin-top:12px; border-radius:8px; background:#292414; color:#fcd34d; }
+    .monitor-note.receiving { background:#142a43; color:#bfdbfe; }
+    .monitor-note.unavailable { background:#3b1f2b; color:#fecaca; }
+    .evidence-panel { border:1px solid #334766; border-radius:10px; padding:14px; margin-bottom:20px; }
+    .evidence-chart { width:100%; height:auto; display:block; }
+    .evidence-warnings { color:#fcd34d; padding-left:20px; }
     @media(max-width:700px){ .table-wrap{overflow:auto} .stats{grid-template-columns:repeat(2,1fr)} }
   </style>
 </head>
@@ -108,6 +114,76 @@
     const categories = {UNASSESSED:'尚未判断', SIMULATED_TEST:'模拟测试',
       SUSPECTED_FALSE_POSITIVE:'疑似误报', NEEDS_VERIFICATION:'需要联系核实', OTHER:'其他'};
     const categoryLabel = value => categories[value] || String(value ?? '');
+    let lastSuccessfulRefreshMs = null;
+    let refreshSucceeded = false;
+    let refreshRequestId = 0;
+    let refreshInFlight = null;
+    const monitoringLabels = {UNKNOWN:'上报状态未知',UNAVAILABLE:'云端监测不可用',INVALID:'板端报告数据无效',
+      PROGRESS_UNVERIFIED:'设备时间未持续推进',DELAY_SUSPECTED:'疑似上报滞后',WARMING_UP:'等待时间推进证据',REPORTING:'近期上报可用'};
+    const evidenceWarnings = {RAW_IMU_NOT_AVAILABLE:'没有原始 IMU 数据，不能验证冲击、姿态或静止。',
+      NOT_ALL_INFERENCE_WINDOWS_UPLOADED:'普通状态合并上传；云端不是完整的逐窗口记录。',
+      NO_PRE_TRIGGER_REPORT:'缺少触发前上报。',NO_POST_TRIGGER_VALID_REPORT:'缺少触发后同配置有效上报。',
+      INVALID_REPORT_IN_SPAN:'证据区间含板端 INVALID 状态。',CONFIGURATION_CHANGED_IN_SPAN:'区间内模型、阈值、pipeline 或测试标记发生变化。',
+      RECEIVED_REPORT_GAP:'收到的相邻记录存在超过 7.5 秒的板端时间间隔（并非 IMU 丢样结论）。',
+      EVIDENCE_POINTS_TRUNCATED:'证据展示最多 200 点，当前已截断。',DEVICE_ORDER_INCONSISTENT:'板端时间与序号顺序不一致。',
+      OUT_OF_ORDER_RECEIPT:'网络接收顺序与板端顺序不同，可能为排队或迟到数据。',EARLY_SESSION_TRIGGER:'触发发生在会话早期，触发前观察不足。'};
+
+    function monitoringHtml(item) {
+      const monitoring = item.monitoring || {status:'UNKNOWN'};
+      const stalePage = !refreshSucceeded || lastSuccessfulRefreshMs == null || Date.now()-lastSuccessfulRefreshMs > 30000;
+      const state = stalePage ? 'UNKNOWN' : monitoring.status;
+      const style = state === 'REPORTING' ? 'receiving' : ['UNAVAILABLE','INVALID'].includes(state) ? 'unavailable' : '';
+      return `<div class="monitor-note ${style}"><strong>${escapeHtml(stalePage ? '页面数据已过期，当前上报状态未知' : monitoringLabels[state] || state)}</strong>
+        <div>${stalePage ? '请等待刷新恢复，不应沿用旧状态判断当前情况。' : state === 'UNAVAILABLE'
+          ? '没有近期上报；断电、断网或程序停滞的具体原因未知。' : state === 'REPORTING'
+          ? '只验证近期收到上报且板端时间推进，不代表采样健康或人员安全。' : '当前检测证据不足，不能按“人员正常”解释。'}</div>
+        <div>人员状态：未核实 · 原始采样健康：未验证</div>
+        ${monitoring.last_report_at ? `<div>最近上报：${time(monitoring.last_report_at)} · 最近时间推进：${time(monitoring.last_progress_at)}</div>` : ''}
+        ${monitoring.last_session_change_at ? `<div>观察到会话变化：${time(monitoring.last_session_change_at)}（不等于已确定重启原因）</div>` : ''}</div>`;
+    }
+
+    function evidenceHtml(evidence, id) {
+      if (!evidence) return '<div class="monitor-note">尚无事件证据快照，请确认后端也已更新。</div>';
+      const start=Number(evidence.span_start_ms), end=Number(evidence.span_end_ms);
+      const x = ms => 48+Math.max(0,Math.min(1,(Number(ms)-start)/Math.max(1,end-start)))*624;
+      const y = score => 124-Math.max(0,Math.min(1,Number(score)))*100;
+      const dots = evidence.points.map(point => point.score == null ? '' : `<circle cx="${x(point.uptime_ms)}" cy="${y(point.score)}"
+        r="${point.is_trigger ? 5 : 3}" fill="${point.is_trigger ? '#f87171' : point.same_configuration ? '#60a5fa' : '#94a3b8'}">
+        <title>${escapeHtml(`板端 ${point.uptime_ms} ms · 分数 ${pct(point.score)} · ${point.state}`)}</title></circle>`).join('');
+      return `<div class="evidence-panel"><h2>事件证据（候选，不是真实跌倒确认）</h2>
+        <p class="detail-note">${escapeHtml(evidence.event_key)} · 快照修订 ${Number(evidence.revision)} ·
+          ${evidence.source === 'reconstructed' ? '从历史已存上报重建' : '随新上报更新'} · ${time(evidence.updated_at)}</p>
+        <div class="detail-grid">
+          <div class="detail-item"><span>同会话收到的证据点</span><strong>${Number(evidence.returned_point_count)} / ${Number(evidence.received_point_count)}</strong></div>
+          <div class="detail-item"><span>同配置收到的最高分</span><strong>${pct(evidence.peak_received_score)}</strong></div>
+          <div class="detail-item"><span>收到的高分记录</span><strong>${Number(evidence.positive_report_count)} 条</strong></div>
+          <div class="detail-item"><span>高分观测跨度（非连续时长）</span><strong>${duration(evidence.positive_observed_span_ms)}</strong></div>
+          <div class="detail-item"><span>首条触发后同配置有效记录</span><strong>${escapeHtml(evidence.first_post_trigger_state || '尚无')}</strong></div>
+          <div class="detail-item"><span>触发后 10 秒观察范围</span><strong>${evidence.post_span_reached ? '已看到更后面的板端时间' : '尚未看到完整后观察范围'}</strong></div>
+        </div>
+        <svg class="evidence-chart" viewBox="0 0 720 156" role="img" aria-label="实际收到的窗口模型分数点，红点为触发，虚线为触发阈值">
+          <line x1="48" y1="124" x2="672" y2="124" stroke="#64748b"/>
+          <line x1="48" y1="24" x2="48" y2="124" stroke="#64748b"/>
+          <line x1="48" y1="${y(evidence.threshold)}" x2="672" y2="${y(evidence.threshold)}" stroke="#fbbf24" stroke-dasharray="5 4"/>
+          <line x1="${x(evidence.trigger_uptime_ms)}" y1="24" x2="${x(evidence.trigger_uptime_ms)}" y2="124" stroke="#f87171" stroke-dasharray="3 4"/>
+          <text x="10" y="28" fill="#91a5c3" font-size="12">100%</text><text x="18" y="128" fill="#91a5c3" font-size="12">0%</text>
+          <text x="48" y="146" fill="#91a5c3" font-size="12">板端 ${start/1000}s</text>
+          <text x="600" y="146" fill="#91a5c3" font-size="12">${end/1000}s</text>${dots}</svg>
+        <p class="detail-note">只绘制收到的分数点，不连线、不补造缺失窗口。蓝点同配置，灰点配置不同，红点是触发；${Number(evidence.omitted_sequence_count)} 个未收到的中间序号不能直接解释为丢包。</p>
+        <ul class="evidence-warnings">${evidence.warnings.map(code=>`<li>${escapeHtml(evidenceWarnings[code] || code)}</li>`).join('')}</ul>
+        <p class="detail-note">同一 ±10 秒证据范围内关联的候选报警：${evidence.related_alert_ids.map(value=>'#'+Number(value)).join('、')}。仅作关联，不合并报警或改变模型判断。</p>
+        <button class="secondary" onclick="downloadEvidence(${Number(id)})">下载事件证据 JSON</button>
+      </div>`;
+    }
+
+    async function downloadEvidence(id) {
+      try {
+        const data = await getJson(`/api/v1/alerts/${id}/evidence`);
+        const url = URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));
+        const link=document.createElement('a'); link.href=url; link.download=`fall-event-${Number(id)}.json`;
+        link.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+      } catch(error) { alert(`证据下载失败：${error.message}`); }
+    }
 
     function rememberOperator() {
       sessionStorage.setItem('fall_operator_name', document.querySelector('#operator-name').value.trim());
@@ -149,7 +225,9 @@
     }
 
     async function getJson(url) {
-      const response = await fetch(url);
+      const timeout = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+        ? {signal:AbortSignal.timeout(8000)} : undefined;
+      const response = timeout ? await fetch(url,timeout) : await fetch(url);
       if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
       return response.json();
     }
@@ -170,12 +248,13 @@
           <article class="card ${item.state === 'NEW_ALARM' || item.state === 'POSITIVE' ? 'alarm' : ''} ${item.state === 'INVALID' ? 'invalid' : ''}">
             <div class="value">${escapeHtml(item.device_id)} ${testBadge(item.is_test)}
               <span class="badge ${item.connectivity === 'ONLINE' ? 'online' : 'offline'}">${escapeHtml(item.connectivity)}</span></div>
-            <div class="row"><span>最近检测结果</span><span class="value">${escapeHtml(item.detection_result)}</span></div>
-            <div class="row"><span>最近检测分数</span><span class="value">${pct(item.fall_probability)}</span></div>
+            <div class="row"><span>历史窗口模型结果</span><span class="value">${escapeHtml(item.detection_result === 'FALL' ? '疑似高分' : item.detection_result === 'NORMAL' ? '低于阈值' : '无效')}</span></div>
+            <div class="row"><span>历史窗口模型分数</span><span class="value">${pct(item.fall_probability)}</span></div>
             <div class="row"><span>板端状态</span><span>${escapeHtml(item.state)}</span></div>
             <div class="row"><span>最近接收</span><span>${time(item.received_at)}</span></div>
             <div class="row"><span>数据年龄</span><span>${Number(item.age_seconds)} 秒</span></div>
             <div class="row"><span>模型</span><span>${escapeHtml(item.model_version)}</span></div>
+            ${monitoringHtml(item)}
           </article>`).join('') : '<p class="muted">尚未收到设备数据。</p>';
 
         document.querySelector('#alerts').innerHTML = alerts.length ? alerts.map(item => `
@@ -240,6 +319,7 @@
           <div class="detail-item"><span>查看确认记录</span><strong>${statusDetail}</strong></div>
           <div class="detail-item"><span>报警标记记录</span><strong>${alarmDetail}</strong></div>
         </div>
+        ${evidenceHtml(data.evidence,alertItem.id)}
         <div class="note-editor">
           <h2>人工判断备注</h2>
           <p class="detail-note">类别和备注只记录人工判断，不自动改变确认或报警标记。</p>
@@ -305,14 +385,32 @@
       detailAlertData = null;
     }
 
-    async function refresh() {
+    function refresh() {
+      render();
+      if (refreshInFlight) return refreshInFlight;
+      const requestId = ++refreshRequestId;
+      refreshInFlight = performRefresh(requestId).finally(()=>{refreshInFlight=null;});
+      return refreshInFlight;
+    }
+
+    async function performRefresh(requestId) {
       try {
-        [deviceData, alertData] = await Promise.all([
+        const data = await Promise.all([
           getJson('/api/v1/devices'), getJson('/api/v1/alerts?limit=50')
         ]);
+        if (requestId !== refreshRequestId) return;
+        deviceData = data[0];
+        // Keep a successful local write when an earlier polling GET finishes later.
+        alertData = data[1].map(item => pendingAlerts.has(item.id)
+          ? {...item,...alertData.find(current=>current.id === item.id)} : item);
+        lastSuccessfulRefreshMs=Date.now(); refreshSucceeded=true;
         render();
         document.querySelector('#message').textContent = `最后刷新：${new Date().toLocaleTimeString()}`;
-      } catch (error) { document.querySelector('#message').textContent = `刷新失败：${error.message}`; }
+      } catch (error) {
+        if (requestId !== refreshRequestId) return;
+        refreshSucceeded=false; render();
+        document.querySelector('#message').textContent = `刷新失败：${error.message}；当前上报状态未知`;
+      }
     }
 
     async function updateAlertMark(id, path, body, message) {

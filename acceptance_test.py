@@ -183,7 +183,19 @@ def main():
     assert code == 200 and saved["operations_total"] == 6
     assert saved["operations"] == history["items"]
     assert saved["alert"]["judgment_category"] == "SIMULATED_TEST"
-    print("PASS: telemetry, deduplication, context, auth, independent marks, notes, revision conflict, operation history, undo, persistence, legacy compatibility")
+    code, evidence_result = call(args.base_url,f"/api/v1/alerts/{alert_id}/evidence")
+    assert code == 200
+    evidence = evidence_result["evidence"]
+    assert evidence["event_key"] == f"fall-event-{alert_id}"
+    assert evidence["session_id"] == session_id and evidence["device_id"] == device_id
+    assert [point["sequence"] for point in evidence["points"]] == [1,2,3]
+    assert evidence["positive_report_count"] == 2 and evidence["peak_received_score"] == 0.88
+    assert evidence["assessment"] == "CANDIDATE_ONLY" and not evidence["raw_imu_available"]
+    assert evidence_result["current_monitoring"]["sampling_health"] == "UNVERIFIED"
+    code, latest = call(args.base_url, f"/api/v1/devices/{device_id}/latest")
+    assert code == 200 and latest["person_status"] == "UNKNOWN"
+    assert latest["monitoring"]["status"] == "REPORTING"
+    print("PASS: telemetry, deduplication, context, auth, independent marks, notes, history, evidence, reporting health, unknown personal safety, legacy compatibility")
     print(f"Dashboard: {args.base_url.rstrip('/')}/dashboard")
     print(f"Docs: {args.base_url.rstrip('/')}/docs")
     print(f"Upload: {args.base_url.rstrip('/')}/api/v1/telemetry")

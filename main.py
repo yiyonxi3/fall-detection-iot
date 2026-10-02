@@ -9,6 +9,7 @@ import secrets
 import sqlite3
 from typing import Annotated, Literal
 
+import event_evidence
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, StringConstraints, model_validator
@@ -23,7 +24,7 @@ DEVICE_OFFLINE_SECONDS = int(os.getenv("DEVICE_OFFLINE_SECONDS", "30"))
 app = FastAPI(
     title="IoT Fall Detection API",
     description="Nano performs inference; this server receives, stores and displays results.",
-    version="0.7.0",
+    version="0.8.0",
 )
 
 
@@ -137,6 +138,7 @@ def initialise_database() -> None:
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_operations_alert ON alert_operations(alert_id, id DESC)")
+        event_evidence.initialise(conn)
         conn.commit()
 
 
@@ -149,13 +151,17 @@ def to_dict(row: sqlite3.Row) -> dict:
     return item
 
 
-def device_status(row: sqlite3.Row) -> dict:
+def device_status(row: sqlite3.Row, monitoring: dict | None = None) -> dict:
     """Separate connection freshness from the model's last detection result."""
     item = to_dict(row)
     received_at = datetime.fromisoformat(item["received_at"])
     age_seconds = max(0, int((datetime.now(timezone.utc) - received_at).total_seconds()))
     item["age_seconds"] = age_seconds
     item["connectivity"] = "ONLINE" if age_seconds <= DEVICE_OFFLINE_SECONDS else "OFFLINE"
+    if monitoring is not None:
+        item["monitoring"] = monitoring
+        item["connectivity"] = "ONLINE" if monitoring.get("report_age_seconds", DEVICE_OFFLINE_SECONDS+1) <= DEVICE_OFFLINE_SECONDS else "OFFLINE"
+    item["person_status"] = "UNKNOWN"  # A received window score is not a verified diagnosis.
     if item["state"] == "NORMAL":
         item["detection_result"] = "NORMAL"
     elif item["state"] == "INVALID":
@@ -245,6 +251,8 @@ def receive_telemetry(data: TelemetryRequest, response: Response):
                 INSERT INTO alerts (telemetry_event_id, device_id, is_test, created_at)
                 VALUES (?, ?, ?, ?)
             """, (cursor.lastrowid, data.device_id, int(data.is_test), received_at))
+        event = conn.execute("SELECT * FROM telemetry_events WHERE id=?", (cursor.lastrowid,)).fetchone()
+        event_evidence.ingest(conn, event)
         conn.commit()
 
     return {"status": "accepted", "device_id": data.device_id,
@@ -255,26 +263,30 @@ def receive_telemetry(data: TelemetryRequest, response: Response):
 @app.get("/api/v1/devices/{device_id}/latest")
 def latest_device_status(device_id: str):
     with closing(db_connection()) as conn:
+        conn.execute("BEGIN")
         row = conn.execute("""
-            SELECT * FROM telemetry_events WHERE device_id=? ORDER BY id DESC LIMIT 1
+            SELECT e.* FROM reporting_heads h JOIN reporting_sessions s
+              ON s.device_id=h.device_id AND s.session_id=h.session_id
+            JOIN telemetry_events e ON e.id=s.highwater_event_id WHERE h.device_id=?
         """, (device_id,)).fetchone()
+        monitoring = event_evidence.reporting_health(conn, device_id, now(), DEVICE_OFFLINE_SECONDS)
     if row is None:
         raise HTTPException(status_code=404, detail="No telemetry found for this device")
-    return device_status(row)
+    return device_status(row, monitoring)
 
 
 @app.get("/api/v1/devices")
 def list_devices():
     with closing(db_connection()) as conn:
+        conn.execute("BEGIN")
         rows = conn.execute("""
-            SELECT e.* FROM telemetry_events e
-            JOIN (
-                SELECT device_id, MAX(id) AS latest_id
-                FROM telemetry_events GROUP BY device_id
-            ) latest ON e.id=latest.latest_id
+            SELECT e.* FROM reporting_heads h JOIN reporting_sessions s
+              ON s.device_id=h.device_id AND s.session_id=h.session_id
+            JOIN telemetry_events e ON e.id=s.highwater_event_id
             ORDER BY e.id DESC
         """).fetchall()
-    return [device_status(row) for row in rows]
+        devices = [device_status(row, event_evidence.reporting_health(conn,row["device_id"],now(),DEVICE_OFFLINE_SECONDS)) for row in rows]
+    return devices
 
 
 @app.get("/api/v1/events")
@@ -364,6 +376,7 @@ def alert_context(
         operation_total = conn.execute(
             "SELECT COUNT(*) FROM alert_operations WHERE alert_id=?", (alert_id,),
         ).fetchone()[0]
+        evidence = event_evidence.read_evidence(conn, alert_id)
 
     alert = to_dict(alert_row)
     trigger_event = to_dict(trigger_row)
@@ -380,6 +393,7 @@ def alert_context(
         "context_events": context_events,
         "operations": [operation_dict(row) for row in operation_rows],
         "operations_total": operation_total,
+        "evidence": evidence,
         "context": {
             "requested_before": before,
             "requested_after": after,
@@ -391,6 +405,18 @@ def alert_context(
             "has_more_after": after_total > len(after_events),
         },
     }
+
+
+@app.get("/api/v1/alerts/{alert_id}/evidence")
+def alert_evidence(alert_id: int):
+    with closing(db_connection()) as conn:
+        conn.execute("BEGIN")
+        row = conn.execute("SELECT device_id FROM alerts WHERE id=?", (alert_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        evidence = event_evidence.read_evidence(conn, alert_id)
+        monitoring = event_evidence.reporting_health(conn,row["device_id"],now(),DEVICE_OFFLINE_SECONDS)
+    return {"evidence":evidence, "current_monitoring":monitoring}
 
 
 def set_review_status(alert_id: int, confirmed: bool, updated_by: str) -> dict:

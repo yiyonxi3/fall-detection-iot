@@ -9,17 +9,17 @@
     body { margin: 0; background:#09111f; color:#e5eefc; }
     header { padding:24px max(24px,5vw); border-bottom:1px solid #24334d; background:#0d1728; }
     h1 { margin:0 0 6px; font-size:24px; } header p { margin:0; color:#91a5c3; }
-    main { padding:24px max(24px,5vw); display:grid; gap:24px; }
+    main { max-width:1180px; margin:auto; padding:24px; display:grid; gap:24px; }
     section { background:#101c30; border:1px solid #24334d; border-radius:14px; padding:18px; }
     h2 { margin:0 0 14px; font-size:18px; }
     .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:12px; }
-    .stats { display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:12px; }
+    .stats { display:grid; grid-template-columns:repeat(3,minmax(120px,1fr)); gap:12px; }
     .stat { background:#15243c; border-radius:10px; padding:14px; }
     .stat strong { display:block; margin-top:5px; font-size:26px; }
     .card { background:#15243c; border-radius:10px; padding:14px; border-left:4px solid #3b82f6; }
     .alarm { border-left-color:#ef4444; } .invalid { border-left-color:#f59e0b; }
     .row { display:flex; justify-content:space-between; gap:12px; margin-top:7px; color:#b9c7dc; }
-    .value { color:#fff; font-weight:650; } .muted { color:#91a5c3; }
+    .value { color:#fff; font-weight:650; overflow-wrap:anywhere; } .muted { color:#91a5c3; }
     .badge { display:inline-block; margin-left:7px; padding:2px 7px; border-radius:999px; font-size:12px; }
     .test { background:#7c3aed; } .online { background:#15803d; } .offline { background:#475569; }
     table { width:100%; border-collapse:collapse; font-size:14px; }
@@ -68,42 +68,71 @@
     .evidence-panel { border:1px solid #334766; border-radius:10px; padding:14px; margin-bottom:20px; }
     .evidence-chart { width:100%; height:auto; display:block; }
     .evidence-warnings { color:#fcd34d; padding-left:20px; }
+    h3 { margin:0; font-size:18px; }
+    .incident-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,310px),1fr)); gap:16px; }
+    .card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+    .card-head .badge { margin:0; white-space:nowrap; }
+    .plain-summary { color:#c8d6ea; line-height:1.7; margin:14px 0; }
+    .card-meta { color:#91a5c3; font-size:14px; line-height:1.7; overflow-wrap:anywhere; }
+    .card-footer { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:18px; }
+    .section-head { display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap; align-items:center; }
+    .section-head h2 { margin-bottom:0; }
+    .section-head + .detail-note { margin-top:12px; }
+    .device-headline { font-size:20px; font-weight:700; margin:16px 0 8px; }
+    .device-card .plain-summary { min-height:3em; margin:8px 0 14px; }
+    .summary-panel { background:#15243c; border-radius:12px; padding:18px; margin-bottom:20px; }
+    .summary-panel p { line-height:1.7; }
+    details > summary { cursor:pointer; color:#b9c7dc; padding:8px 0; }
+    details[open] > summary { margin-bottom:12px; }
+    .technical-panel { border-top:1px solid #334766; padding-top:12px; margin-top:22px; }
+    .record-list { display:grid; gap:10px; margin:14px 0; }
+    .record-row { display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap; align-items:center;
+      padding:14px; background:#15243c; border-radius:10px; }
+    .record-row p { margin:6px 0; line-height:1.6; overflow-wrap:anywhere; }
+    .warning-text { color:#fcd34d; }
+    .processing-actions { padding:14px; background:#15243c; border-radius:10px; margin-bottom:18px; }
     @media(max-width:700px){ .table-wrap{overflow:auto} .stats{grid-template-columns:repeat(2,1fr)} }
   </style>
 </head>
 <body>
-  <header><h1>居家跌倒检测监控台</h1><p>Nano 板端推理 · HTTP 云端记录</p></header>
+  <header><h1>居家跌倒监控</h1><p>查看疑似跌倒提醒，了解设备是否在工作。</p></header>
   <main>
     <div id="message"></div>
     <div id="stats" class="stats"></div>
-    <section class="controls">
-      <label><input id="hide-tests" type="checkbox"> 隐藏测试数据</label>
-      <label><input id="open-only" type="checkbox"> 只看含未确认候选的事件</label>
-      <label>操作员名称：<input id="operator-name" type="text" maxlength="100" placeholder="建议填写组员编号" oninput="rememberOperator()"></label>
-      <span class="muted">名称由本人填写，用于记录操作，不是登录身份认证。</span>
-    </section>
-    <section><h2>设备最新状态</h2><div id="devices" class="grid"></div></section>
-    <section><h2>疑似事件</h2>
-      <p class="detail-note">同设备、同会话、同配置，距首个候选 10 秒内关联。时间关联不确认同一次动作或真实跌倒；所有原始候选保留。</p>
-      <div id="incidents" class="grid"></div>
+    <input id="operator-name" type="hidden">
+    <section>
+      <div class="section-head"><h2>需要查看的提醒</h2><details><summary>筛选</summary><div class="controls">
+        <label><input id="hide-tests" type="checkbox"> 隐藏测试设备的记录</label>
+        <label><input id="open-only" type="checkbox"> 只看尚未全部查看的提醒</label>
+      </div></details></div>
+      <p class="detail-note">提醒表示疑似跌倒，实际情况需要核实。</p>
+      <div id="incidents" class="incident-grid"></div>
+      <button id="reminder-more" class="secondary" onclick="toggleMoreReminders()" hidden>查看更多待查看提醒</button>
       <p id="incident-page-note" class="detail-note"></p>
-      <button id="incident-more" class="secondary" onclick="loadMoreIncidents()">加载更早事件</button>
+      <button id="incident-more" class="secondary" onclick="loadMoreIncidents()">加载更早的提醒</button>
     </section>
-    <section><details><summary>原始候选报警（最近 50 条）</summary><div class="table-wrap"><table>
+    <section><h2>设备状态</h2><div id="devices" class="grid"></div></section>
+    <section><details id="history-section"><summary>已查看的提醒</summary><div id="incident-history" class="incident-grid"></div></details>
+      <details class="technical-panel"><summary>技术记录（最近 50 条原始候选）</summary><div class="table-wrap"><table>
       <thead><tr><th>设备</th><th>分数 / 阈值</th><th>接收时间</th><th>状态</th><th>操作</th></tr></thead>
       <tbody id="alerts"></tbody>
     </table></div></details></section>
   </main>
   <dialog id="incident-detail-dialog" aria-labelledby="incident-detail-title">
     <div class="detail-shell"><div class="detail-head">
-      <h2 id="incident-detail-title">疑似事件详情</h2>
+      <h2 id="incident-detail-title">这次提醒的情况</h2>
       <button type="button" class="close" aria-label="关闭事件详情" onclick="closeIncidentDetail()">×</button>
     </div><div id="incident-detail-body"></div></div>
+  </dialog>
+  <dialog id="device-detail-dialog" aria-labelledby="device-detail-title">
+    <div class="detail-shell"><div class="detail-head"><h2 id="device-detail-title">设备情况</h2>
+      <button type="button" class="close" aria-label="关闭设备详情" onclick="closeDeviceDetail()">×</button></div>
+      <div id="device-detail-body"></div></div>
   </dialog>
   <dialog id="alert-detail-dialog" aria-labelledby="alert-detail-title">
     <div class="detail-shell">
       <div class="detail-head">
-        <div><h2 id="alert-detail-title">报警详情</h2><div id="alert-detail-subtitle" class="muted"></div></div>
+        <div><h2 id="alert-detail-title">查看并记录处理情况</h2><div id="alert-detail-subtitle" class="muted"></div></div>
         <button type="button" class="close" aria-label="关闭" onclick="closeAlertDetail()">×</button>
       </div>
       <div id="alert-detail-body" class="muted">正在加载…</div>
@@ -114,20 +143,23 @@
     const pct = value => value == null ? "—" : `${(value * 100).toFixed(1)}%`;
     const time = value => value ? new Date(value).toLocaleString() : "—";
     const duration = value => value == null ? "—" : `${(Number(value) / 1000).toFixed(1)} 秒`;
-    const testBadge = value => value ? '<span class="badge test">测试</span>' : '';
-    const alertStatusLabel = value => value === 'ACKNOWLEDGED' ? '已确认' : value === 'OPEN' ? '未确认' : escapeHtml(value);
-    const alarmMarkLabel = value => value ? '已报警' : '未报警';
+    const testBadge = value => value ? '<span class="badge test">测试设备</span>' : '';
+    const alertStatusLabel = value => value === 'ACKNOWLEDGED' ? '已查看' : value === 'OPEN' ? '尚未查看' : '状态未知';
+    const alarmMarkLabel = value => value ? '已标记需要报警' : '未标记需要报警';
     let deviceData = [];
     let alertData = [];
     let incidentData = [];
     let incidentLimit = 50;
     let incidentMayHaveMore = true;
     let incidentLoading = false;
+    let reminderDisplayLimit = 3;
     let detailIncidentId = null;
     let detailIncidentData = null;
     let incidentDetailRequestId = 0;
     let detailAlertId = null;
     let detailAlertData = null;
+    let detailDeviceId = null;
+    const panelStates = new Map();
     const pendingAlerts = new Set();
     const noteDrafts = new Map();
     const categories = {UNASSESSED:'尚未判断', SIMULATED_TEST:'模拟测试',
@@ -156,6 +188,93 @@
       SESSION_BOUNDARY:'期间发生会话变化，单独建立事件',RECEIPT_WINDOW_EXPIRED:'接收间隔过长，单独建立事件',
       LATE_OUT_OF_ORDER_CANDIDATE:'候选迟于较新的板端记录到达，保留为独立事件'};
 
+    function pageIsStale() {
+      return !refreshSucceeded || lastSuccessfulRefreshMs == null || Date.now()-lastSuccessfulRefreshMs > 30000;
+    }
+
+    function shortTime(value) {
+      if (!value) return '时间未知';
+      const date = new Date(value);
+      if (!Number.isFinite(date.getTime())) return '时间未知';
+      const options = {timeZone:'Asia/Shanghai'};
+      const day = date.toLocaleDateString('zh-CN',options);
+      const today = new Date().toLocaleDateString('zh-CN',options);
+      const yesterday = new Date(Date.now()-86400000).toLocaleDateString('zh-CN',options);
+      const clock = date.toLocaleTimeString('zh-CN',{...options,hour:'2-digit',minute:'2-digit',hour12:false});
+      return `${day === today ? '今天' : day === yesterday ? '昨天' : day} ${clock}`;
+    }
+
+    function ageLabel(seconds) {
+      if (!Number.isFinite(Number(seconds)) || seconds == null) return '时间未知';
+      const age = Math.max(0,Math.floor(Number(seconds)));
+      return age < 60 ? `${age}秒` : age < 3600 ? `${Math.floor(age/60)}分钟` : age < 86400
+        ? `${Math.floor(age/3600)}小时` : `${Math.floor(age/86400)}天`;
+    }
+
+    function effectiveMonitoring(item) {
+      if (pageIsStale()) return 'UNKNOWN';
+      const monitoring = item.monitoring || {};
+      const elapsed = Math.max(0,Math.floor((Date.now()-lastSuccessfulRefreshMs)/1000));
+      const timeout = Number(monitoring.offline_after_seconds ?? 30);
+      if (monitoring.report_age_seconds != null && Number(monitoring.report_age_seconds)+elapsed > timeout) return 'UNAVAILABLE';
+      if (monitoring.status === 'REPORTING' && monitoring.progress_age_seconds != null &&
+          Number(monitoring.progress_age_seconds)+elapsed > timeout) return 'PROGRESS_UNVERIFIED';
+      return monitoring.status || 'UNKNOWN';
+    }
+
+    function devicePresentation(item) {
+      const state = effectiveMonitoring(item);
+      if (state === 'REPORTING') {
+        const positive = ['NEW_ALARM','POSITIVE'].includes(item.state);
+        return {state, working:true, style:positive ? 'alarm' : '',
+          headline:positive ? '检测到疑似跌倒信号' : '正在检测',
+          description:positive ? '最近一次检测触发了疑似跌倒提醒，请查看相关记录。'
+            : item.state === 'NORMAL' ? '最近一次检测没有触发跌倒提醒。' : '设备正在传来新的检测数据。'};
+      }
+      const descriptions = {UNAVAILABLE:'设备没有传来新数据，请检查电源和网络。',
+        INVALID:'设备传来的数据无法使用，请检查设备。',
+        PROGRESS_UNVERIFIED:'收到了消息，但检测数据没有持续更新，请检查设备。',
+        DELAY_SUSPECTED:'数据可能延迟到达，暂时无法判断当前情况。',
+        WARMING_UP:'设备刚开始传来数据，正在等待新的检测结果。',
+        UNKNOWN:pageIsStale() ? '页面暂时没有更新，正在尝试重新连接。' : '还没有足够的数据，请等待更新。'};
+      return {state,working:false,style:'invalid',headline:state === 'WARMING_UP' ? '正在连接，等待检测' : '暂时无法判断',
+        description:descriptions[state] || descriptions.UNKNOWN};
+    }
+
+    function rememberPanel(key, open) { panelStates.set(key,Boolean(open)); }
+
+    function technicalPanel(key, content) {
+      return `<details class="technical-panel" ${panelStates.get(key) ? 'open' : ''}
+        ontoggle="rememberPanel('${key}',this.open)"><summary id="${key}-toggle">展开技术分析</summary>${content}</details>`;
+    }
+
+    function incidentStory(item) {
+      const count = Number(item.candidate_count);
+      const lead = count > 1 ? `短时间内记录了${count === 2 ? '两' : count}次疑似跌倒信号，已整理在一起。`
+        : '系统记录了一次疑似跌倒信号。';
+      const evidence = item.evidence || {};
+      const reasons = evidence.reasons || [];
+      let followup = '正在等待后续数据，暂时无法判断当时的实际情况。';
+      if (evidence.state === 'OBSERVED') followup = '之后仍有数据传来，是否真的跌倒还需要核实。';
+      else if (evidence.state === 'INCOMPLETE') followup = reasons.includes('POST_REPORT_TIMEOUT')
+        ? '之后未及时收到新的有效数据，无法继续判断。请检查设备并核实当时情况。'
+        : '后续数据有间隔或异常，无法连续判断。请检查设备并核实当时情况。';
+      return {lead,followup,review:item.review_state === 'REVIEWED' ? '已查看'
+        : Number(item.reviewed_count) > 0 ? '部分已查看' : '尚未查看'};
+    }
+
+    function reminderCard(item) {
+      const story = incidentStory(item);
+      return `<article class="card reminder-card ${item.requires_evidence_check ? 'invalid' : item.review_state === 'REVIEWED' ? '' : 'alarm'}">
+        <div class="card-head"><h3>疑似跌倒提醒</h3><span class="badge ${item.review_state === 'REVIEWED' ? 'offline' : 'test'}">${story.review}</span></div>
+        <p class="card-meta">${shortTime(item.created_at)} · ${escapeHtml(item.device_id)} ${testBadge(item.is_test)}</p>
+        <p class="plain-summary">${story.lead}<br>${story.followup}</p>
+        ${Number(item.alarm_marked_count) > 0 ? '<p class="warning-text">已有人标记需要报警，请查看处理记录。</p>' : ''}
+        ${pageIsStale() ? '<p class="warning-text">页面未更新，后续情况等待刷新。</p>' : ''}
+        <div class="card-footer"><span class="muted">提醒 ${Number(item.id)}</span>
+          <button id="reminder-button-${Number(item.id)}" onclick="showIncidentDetail(${Number(item.id)})">查看情况</button></div></article>`;
+    }
+
     function incidentQuery(limit) {
       return `/api/v1/incidents?limit=${limit}&hide_tests=${document.querySelector('#hide-tests').checked}&open_only=${document.querySelector('#open-only').checked}`;
     }
@@ -174,22 +293,22 @@
       const hideTests = document.querySelector('#hide-tests').checked;
       const openOnly = document.querySelector('#open-only').checked;
       const items = incidentData.filter(item=>(!hideTests || !item.is_test) && (!openOnly || item.review_state !== 'REVIEWED'));
-      document.querySelector('#incidents').innerHTML = items.length ? items.map(item=>`<article class="card ${item.requires_evidence_check ? 'invalid' : ''}">
-        <div class="value">${escapeHtml(item.incident_key)} ${testBadge(item.is_test)}</div>
-        <div class="row"><span>设备</span><span>${escapeHtml(item.device_id)}</span></div>
-        <div class="row"><span>候选观察</span><span>${item.candidate_count > 1 ? '多候选疑似' : '单候选疑似'} · ${Number(item.candidate_count)} 条</span></div>
-        <div class="row"><span>最高窗口分数</span><span>${pct(item.peak_score)}</span></div>
-        <div class="row"><span>首个接收</span><span>${time(item.created_at)}</span></div>
-        <div class="row"><span>查看确认进度</span><span>${Number(item.reviewed_count)} / ${Number(item.candidate_count)}</span></div>
-        <div class="row"><span>人工需要报警标记</span><span>${Number(item.alarm_marked_count)} 条</span></div>
-        ${incidentEvidenceHtml(item)}
-        <p class="detail-note">${item.source === 'reconstructed' ? '由历史上报重建' : '实时关联'} · 多候选不等于已确认跌倒。</p>
-        <button class="secondary" onclick="showIncidentDetail(${Number(item.id)})">查看事件与核查候选</button>
-      </article>`).join('') : '<p class="muted">当前筛选下没有疑似事件。</p>';
-      document.querySelector('#incident-page-note').textContent = `已加载 ${incidentData.length} 个事件；原始候选全部保留。查看确认仅表示记录已被查看，不能据此判断人员安全。`;
+      const pending = items.filter(item=>item.review_state !== 'REVIEWED');
+      const reviewed = items.filter(item=>item.review_state === 'REVIEWED');
+      document.querySelector('#incidents').innerHTML = pending.length ? pending.slice(0,reminderDisplayLimit).map(reminderCard).join('')
+        : `<p class="muted">${lastSuccessfulRefreshMs == null ? '正在加载提醒…' : '当前已加载记录中没有待查看的提醒。'}</p>`;
+      document.querySelector('#incident-history').innerHTML = reviewed.length ? reviewed.map(reminderCard).join('')
+        : '<p class="muted">当前筛选下没有已查看的提醒。</p>';
+      document.querySelector('#incident-page-note').textContent = `已加载 ${incidentData.length} 条提醒，其中 ${pending.length} 条待查看。更早的记录可继续加载。`;
+      document.querySelector('#reminder-more').hidden = pending.length <= 3;
+      document.querySelector('#reminder-more').textContent = reminderDisplayLimit === 3
+        ? `展开其余 ${Math.max(0,pending.length-3)} 条已加载提醒` : '收起更多提醒';
       document.querySelector('#incident-more').disabled = incidentLoading || !incidentMayHaveMore || incidentLimit >= 200;
-      document.querySelector('#incident-more').textContent = incidentLoading ? '加载中…' : incidentLimit >= 200 ? '已加载最近 200 个事件' : incidentMayHaveMore ? '加载更早事件' : '已加载全部匹配事件';
+      document.querySelector('#incident-more').hidden = !incidentMayHaveMore;
+      document.querySelector('#incident-more').textContent = incidentLoading ? '加载中…' : incidentLimit >= 200 ? '已加载最近 200 条提醒' : incidentMayHaveMore ? '加载更早的提醒' : '已加载全部匹配提醒';
     }
+
+    function toggleMoreReminders() { reminderDisplayLimit = reminderDisplayLimit === 3 ? 200 : 3; renderIncidents(); }
 
     async function loadMoreIncidents() {
       if (incidentLoading || incidentLimit >= 200 || !incidentMayHaveMore) return;
@@ -199,24 +318,76 @@
     }
 
     function renderIncidentDetail(item) {
-      document.querySelector('#incident-detail-body').innerHTML = `<p class="detail-note">${escapeHtml(item.incident_key)} · ${escapeHtml(item.device_id)} · Session ${escapeHtml(item.session_id)}</p>
+      const focusedId = document.activeElement?.id;
+      const story = incidentStory(item);
+      const current = devicePresentation({monitoring:item.current_monitoring});
+      const technical = `<p class="detail-note">${escapeHtml(item.incident_key)} · Session ${escapeHtml(item.session_id)} ·
+          ${item.source === 'reconstructed' ? '从历史上报重建' : '随新上报关联'}</p>
         <div class="detail-grid"><div class="detail-item"><span>关联候选</span><strong>${Number(item.candidate_count)} 条</strong></div>
-          <div class="detail-item"><span>最高窗口分数</span><strong>${pct(item.peak_score)}</strong></div>
+          <div class="detail-item"><span>关联候选最高模型分数</span><strong>${pct(item.peak_score)}</strong></div>
           <div class="detail-item"><span>板端候选时间跨度</span><strong>${duration(item.last_uptime_ms-item.first_uptime_ms)}</strong></div>
           <div class="detail-item"><span>判断规则</span><strong>首候选起 10 秒固定窗口</strong></div></div>
         ${incidentEvidenceHtml(item)}
+        <p class="detail-note">模型分数不是准确率，也不是经过校准的真实跌倒概率。这里只取关联候选的最高值，不包含所有后续普通窗口。</p>
         <p class="detail-note">${item.evidence.first_post_candidate_report ? `最后候选后首个有效接收：${escapeHtml(item.evidence.first_post_candidate_report.state)} / ${pct(item.evidence.first_post_candidate_report.score)}。分数回落不确认人员安全。` : '尚无最后候选后的有效接收记录。'}</p>
-        <h2>原始候选与人工核查</h2><div class="table-wrap"><table><thead><tr><th>候选</th><th>板端时间 / 分数</th><th>关联依据</th><th>查看 / 报警标记</th><th>判断备注</th><th>操作</th></tr></thead><tbody>
+        <h2>候选关联分析</h2><div class="table-wrap"><table><thead><tr><th>候选</th><th>板端时间 / 分数</th><th>关联依据</th><th>查看 / 报警标记</th><th>判断备注</th></tr></thead><tbody>
         ${item.candidates.map(candidate=>`<tr><td>#${Number(candidate.id)}</td><td>${duration(candidate.uptime_ms)} / ${pct(candidate.fall_probability)}</td>
           <td>${escapeHtml(associationLabels[candidate.relation_reason] || candidate.relation_reason)}</td>
           <td>${alertStatusLabel(candidate.status)} / ${alarmMarkLabel(candidate.alarm_required)}</td>
-          <td>${escapeHtml(categoryLabel(candidate.judgment_category))}<br>${escapeHtml(candidate.judgment_note)}</td>
-          <td><button class="secondary" onclick="openIncidentCandidate(${Number(candidate.id)})">核查候选</button></td></tr>`).join('')}</tbody></table></div>
-        <p class="detail-note">人工确认、需要报警标记、备注与操作历史沿用每条候选的记录。事件查看进度按候选汇总；不会向其他候选传播人工结论。</p>
+          <td>${escapeHtml(categoryLabel(candidate.judgment_category))}<br>${escapeHtml(candidate.judgment_note)}</td></tr>`).join('')}</tbody></table></div>
+        <p class="detail-note">查看状态、需要报警标记、备注与操作历史沿用每条候选的记录。事件查看进度按候选汇总；不会向其他候选传播人工结论。</p>
         ${monitoringHtml({monitoring:item.current_monitoring})}
         <p class="detail-note">以上监测状态是当前查询结果；事件证据是历史观察。已经完成的历史观察不会因后来设备离线而变成中断。</p>
-        <button class="secondary" onclick="downloadIncident(${Number(item.id)})">下载疑似事件 JSON</button>`;
+        <button class="secondary" onclick="downloadIncident(${Number(item.id)})">下载事件分析 JSON</button>`;
+      document.querySelector('#incident-detail-body').innerHTML = `
+        <div class="summary-panel"><div class="card-head"><h3>疑似跌倒提醒</h3><span class="badge offline">${story.review}</span></div>
+          <p class="card-meta">提醒时间：${shortTime(item.created_at)}<br>设备：${escapeHtml(item.device_id)} ${testBadge(item.is_test)}</p>
+          <p class="plain-summary">${story.lead}</p><p class="plain-summary">${story.followup}</p>
+          <p class="detail-note">这些记录不能直接确认真实跌倒。请结合当时情况和处理备注核实。</p>
+          ${pageIsStale() ? '<p class="warning-text">页面未更新，后续情况等待刷新。</p>' : ''}</div>
+        <h2>查看与处理记录</h2>
+        <p class="detail-note">${story.review}。查看记录、填写备注或标记需要报警，都在下面对应记录中操作。</p>
+        <div class="record-list">${item.candidates.map(candidate=>`<article class="record-row"><div>
+          <strong>记录 ${Number(candidate.id)} · ${shortTime(candidate.received_at)}</strong>
+          <p>${alertStatusLabel(candidate.status)} · ${alarmMarkLabel(candidate.alarm_required)}</p>
+          ${candidate.judgment_note ? `<p>处理备注：${escapeHtml(candidate.judgment_note)}</p>` : '<p class="muted">尚未填写处理备注。</p>'}
+          </div><button id="record-button-${Number(candidate.id)}" class="secondary" onclick="openIncidentCandidate(${Number(candidate.id)})">查看并处理</button></article>`).join('')}</div>
+        <p class="detail-note">“已查看”只表示看过记录；报警标记只记录处理决定，不会发送通知。</p>
+        <div class="summary-panel"><h3>设备现在的情况</h3><p>${escapeHtml(current.headline)}：${escapeHtml(current.description)}</p>
+          <p class="detail-note">这是现在的设备状态，与上面历史提醒发生时的情况分开显示。</p></div>
+        ${technicalPanel(`incident-tech-${Number(item.id)}`,technical)}`;
+      if (focusedId) document.getElementById?.(focusedId)?.focus?.({preventScroll:true});
     }
+
+    function renderDeviceDetail() {
+      const item = deviceData.find(device=>device.device_id === detailDeviceId);
+      if (!item) { document.querySelector('#device-detail-body').innerHTML='<p class="muted">暂时无法取得这个设备的信息。</p>'; return; }
+      const view = devicePresentation(item);
+      const technical = `<div class="detail-grid">
+        <div class="detail-item"><span>历史窗口模型结果</span><strong>${escapeHtml(item.detection_result)}</strong></div>
+        <div class="detail-item"><span>最近窗口模型分数 / 阈值</span><strong>${pct(item.fall_probability)} / ${pct(item.threshold)}</strong></div>
+        <div class="detail-item"><span>板端状态</span><strong>${escapeHtml(item.state)}</strong></div>
+        <div class="detail-item"><span>模型</span><strong>${escapeHtml(item.model_version)}</strong></div>
+        <div class="detail-item"><span>Pipeline</span><strong>${escapeHtml(item.pipeline_version)}</strong></div>
+        <div class="detail-item"><span>Session / Sequence</span><strong>${escapeHtml(item.session_id)} / ${Number(item.sequence)}</strong></div>
+        <div class="detail-item"><span>最近接收</span><strong>${time(item.received_at)}</strong></div>
+        <div class="detail-item"><span>设备运行时间</span><strong>${duration(item.uptime_ms)}</strong></div></div>
+        ${monitoringHtml(item)}<p class="detail-note">分数是模型对一段数据的输出，不是准确率或真实跌倒概率。历史低分不能证明人员当前安全。</p>`;
+      document.querySelector('#device-detail-body').innerHTML=`<div class="summary-panel"><h3>${escapeHtml(item.device_id)} ${testBadge(item.is_test)}</h3>
+        <p class="device-headline">${view.headline}</p><p>${view.description}</p>
+        <p class="card-meta">最后更新：${shortTime(item.monitoring?.last_report_at || item.received_at)}</p></div>
+        ${view.working ? '<p class="detail-note">这里显示最近一次检测情况。待查看的提醒仍需单独处理。</p>'
+          : '<h2>可以先检查</h2><ol><li>设备是否通电。</li><li>设备是否连接到网络。</li><li>等待页面重新收到检测数据。</li></ol><p class="detail-note">目前不能仅凭页面确定具体原因。</p>'}
+        ${technicalPanel('device-tech',technical)}`;
+    }
+
+    function showDeviceDetail(index) {
+      const item = deviceData[index]; if (!item) return;
+      detailDeviceId = item.device_id; panelStates.delete('device-tech');
+      renderDeviceDetail(); document.querySelector('#device-detail-dialog').showModal();
+    }
+
+    function closeDeviceDetail() { detailDeviceId=null; document.querySelector('#device-detail-dialog').close(); }
 
     async function loadIncidentDetail(id) {
       const requestId = ++incidentDetailRequestId;
@@ -228,7 +399,7 @@
       } catch(error) {
         if (detailIncidentId === id && requestId === incidentDetailRequestId) {
           detailIncidentData = null;
-          document.querySelector('#incident-detail-body').innerHTML = `<p class="error">事件详情加载失败：${escapeHtml(error.message)}</p>`;
+          document.querySelector('#incident-detail-body').innerHTML = '<p class="error">暂时无法加载这次提醒，请关闭后重新打开。</p>';
         }
       }
     }
@@ -261,7 +432,7 @@
     function monitoringHtml(item) {
       const monitoring = item.monitoring || {status:'UNKNOWN'};
       const stalePage = !refreshSucceeded || lastSuccessfulRefreshMs == null || Date.now()-lastSuccessfulRefreshMs > 30000;
-      const state = stalePage ? 'UNKNOWN' : monitoring.status;
+      const state = effectiveMonitoring(item);
       const style = state === 'REPORTING' ? 'receiving' : ['UNAVAILABLE','INVALID'].includes(state) ? 'unavailable' : '';
       return `<div class="monitor-note ${style}"><strong>${escapeHtml(stalePage ? '页面数据已过期，当前上报状态未知' : monitoringLabels[state] || state)}</strong>
         <div>${stalePage ? '请等待刷新恢复，不应沿用旧状态判断当前情况。' : state === 'UNAVAILABLE'
@@ -331,9 +502,9 @@
     }
 
     function historyChanges(item) {
-      const labels = {status:'查看确认', alarm_required:'人工报警',
+      const labels = {status:'查看记录', alarm_required:'需要报警标记',
         judgment_category:'判断类别', judgment_note:'判断备注'};
-      const display = (key, value) => key === 'status' ? (value === 'ACKNOWLEDGED' ? '已确认' : '未确认')
+      const display = (key, value) => key === 'status' ? (value === 'ACKNOWLEDGED' ? '已查看' : '尚未查看')
         : key === 'alarm_required' ? alarmMarkLabel(value)
         : key === 'judgment_category' ? categoryLabel(value) : (value || '（空）');
       return Object.entries(labels).filter(([key]) => item.before[key] !== item.after[key])
@@ -345,13 +516,13 @@
       const reviewed = item.status === 'ACKNOWLEDGED';
       const alarmRequired = Boolean(item.alarm_required);
       const disabled = pendingAlerts.has(id) ? 'disabled' : '';
-      return `${includeDetails ? `<button class="secondary" onclick="showAlertDetail(${id})">详情</button>` : ''}
+      return `${includeDetails ? `<button class="secondary" onclick="showAlertDetail(${id})">查看并处理</button>` : ''}
         <button class="${reviewed ? 'reviewed' : 'secondary'}" ${disabled}
-          aria-pressed="${reviewed}" title="点击改为${reviewed ? '未确认' : '已确认'}"
+          aria-pressed="${reviewed}" title="${reviewed ? '撤销已查看标记' : '标记这条记录已被查看'}"
           onclick="setReview(${id}, ${!reviewed})">${alertStatusLabel(item.status)}</button>
         <button class="${alarmRequired ? 'manual-alarm' : 'secondary'}" ${disabled}
-          aria-pressed="${alarmRequired}" title="点击改为${alarmRequired ? '未报警' : '已报警'}（人工标记）"
-          onclick="setAlarmMark(${id}, ${!alarmRequired})">${alarmMarkLabel(alarmRequired)}</button>`;
+          aria-pressed="${alarmRequired}" title="${alarmRequired ? '取消需要报警标记' : '记录需要报警的处理决定'}"
+          onclick="setAlarmMark(${id}, ${!alarmRequired})">${alarmRequired ? alarmMarkLabel(true) : '标记需要报警'}</button>`;
     }
 
     async function getJson(url) {
@@ -363,31 +534,32 @@
     }
 
     function render() {
+        const focusedId = document.activeElement?.id;
         renderIncidents();
         if (detailIncidentId != null && detailIncidentData) renderIncidentDetail(detailIncidentData);
+        if (detailDeviceId != null) renderDeviceDetail();
         const hideTests = document.querySelector('#hide-tests').checked;
         const openOnly = document.querySelector('#open-only').checked;
         const devices = deviceData.filter(item => !hideTests || !item.is_test);
         const alerts = alertData.filter(item => (!hideTests || !item.is_test) && (!openOnly || item.status === 'OPEN'));
-        const online = devices.filter(item => item.connectivity === 'ONLINE').length;
+        const working = devices.filter(item => devicePresentation(item).working).length;
         const pendingIncidents = incidentData.filter(item => (!hideTests || !item.is_test) && item.review_state !== 'REVIEWED').length;
         document.querySelector('#stats').innerHTML = `
-          <div class="stat"><span class="muted">设备总数</span><strong>${devices.length}</strong></div>
-          <div class="stat"><span class="muted">在线设备</span><strong>${online}</strong></div>
-          <div class="stat"><span class="muted">离线设备</span><strong>${devices.length - online}</strong></div>
-          <div class="stat"><span class="muted">待查看事件（已加载）</span><strong>${pendingIncidents}</strong></div>`;
-        document.querySelector('#devices').innerHTML = devices.length ? devices.map(item => `
-          <article class="card ${item.state === 'NEW_ALARM' || item.state === 'POSITIVE' ? 'alarm' : ''} ${item.state === 'INVALID' ? 'invalid' : ''}">
-            <div class="value">${escapeHtml(item.device_id)} ${testBadge(item.is_test)}
-              <span class="badge ${item.connectivity === 'ONLINE' ? 'online' : 'offline'}">${escapeHtml(item.connectivity)}</span></div>
-            <div class="row"><span>历史窗口模型结果</span><span class="value">${escapeHtml(item.detection_result === 'FALL' ? '疑似高分' : item.detection_result === 'NORMAL' ? '低于阈值' : '无效')}</span></div>
-            <div class="row"><span>历史窗口模型分数</span><span class="value">${pct(item.fall_probability)}</span></div>
-            <div class="row"><span>板端状态</span><span>${escapeHtml(item.state)}</span></div>
-            <div class="row"><span>最近接收</span><span>${time(item.received_at)}</span></div>
-            <div class="row"><span>数据年龄</span><span>${Number(item.age_seconds)} 秒</span></div>
-            <div class="row"><span>模型</span><span>${escapeHtml(item.model_version)}</span></div>
-            ${monitoringHtml(item)}
-          </article>`).join('') : '<p class="muted">尚未收到设备数据。</p>';
+          <div class="stat"><span class="muted">待查看提醒 · 已加载</span><strong>${lastSuccessfulRefreshMs == null ? '—' : pendingIncidents}</strong></div>
+          <div class="stat"><span class="muted">正在检测的设备</span><strong>${pageIsStale() ? '—' : working}</strong></div>
+          <div class="stat"><span class="muted">等待数据或需检查的设备</span><strong>${pageIsStale() ? '—' : devices.length-working}</strong></div>`;
+        document.querySelector('#devices').innerHTML = devices.length ? devices.map(item => {
+          const view = devicePresentation(item);
+          const age = item.monitoring?.report_age_seconds ?? item.age_seconds;
+          const elapsed = lastSuccessfulRefreshMs == null ? 0 : Math.max(0,Math.floor((Date.now()-lastSuccessfulRefreshMs)/1000));
+          return `<article class="card device-card ${view.style}">
+            <div class="value">${escapeHtml(item.device_id)} ${testBadge(item.is_test)}</div>
+            <p class="device-headline">${view.headline}</p><p class="plain-summary">${view.description}</p>
+            <div class="card-meta">最后更新：${shortTime(item.monitoring?.last_report_at || item.received_at)}<br>
+              ${age == null ? '尚无更新时间' : `${ageLabel(Number(age)+elapsed)}${view.working ? '前更新' : '没有收到新数据'}`}</div>
+            <div class="card-footer"><button id="device-button-${escapeHtml(item.device_id)}" class="secondary" onclick="showDeviceDetail(${deviceData.indexOf(item)})">${view.working ? '查看设备' : '检查说明'}</button></div>
+          </article>`;
+        }).join('') : `<p class="muted">${lastSuccessfulRefreshMs == null ? '正在加载设备情况…' : '当前筛选下没有设备。'}</p>`;
 
         document.querySelector('#alerts').innerHTML = alerts.length ? alerts.map(item => `
           <tr><td>${escapeHtml(item.device_id)} ${testBadge(item.is_test)}</td>
@@ -395,6 +567,7 @@
           <td><div class="status-stack"><span>${alertStatusLabel(item.status)}</span>
           <span class="muted">${alarmMarkLabel(item.alarm_required)}</span></div></td>
           <td><div class="actions">${actionButtons(item)}</div></td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无候选报警。</td></tr>';
+        if (focusedId) document.getElementById?.(focusedId)?.focus?.({preventScroll:true});
     }
 
     function relationLabel(relation) {
@@ -407,7 +580,7 @@
       const context = data.context;
       const statusDetail = alertItem.status === 'ACKNOWLEDGED'
         ? `${time(alertItem.acknowledged_at)} · ${escapeHtml(alertItem.acknowledged_by || '未知操作员')}`
-        : '尚未确认查看';
+        : '尚未查看';
       const alarmDetail = alertItem.alarm_marked_at
         ? `${time(alertItem.alarm_marked_at)} · ${escapeHtml(alertItem.alarm_marked_by || '未知操作员')}`
         : '尚无人工标记记录';
@@ -417,10 +590,10 @@
       const operations = data.operations || [];
       const historyRows = operations.map(item => `<tr>
         <td>${time(item.operated_at)}</td><td>${escapeHtml(item.operated_by)}</td>
-        <td>${escapeHtml(({REVIEW:'查看确认',ALARM_MARK:'报警标记',NOTE:'判断备注'})[item.action] || item.action)}</td>
+        <td>${escapeHtml(({REVIEW:'查看记录',ALARM_MARK:'需要报警标记',NOTE:'处理备注'})[item.action] || item.action)}</td>
         <td class="history-change">${escapeHtml(historyChanges(item))}</td></tr>`).join('');
       document.querySelector('#alert-detail-subtitle').innerHTML =
-        `${escapeHtml(alertItem.device_id)} ${testBadge(alertItem.is_test)} · 报警 #${Number(alertItem.id)}`;
+        `${escapeHtml(alertItem.device_id)} ${testBadge(alertItem.is_test)} · 记录 ${Number(alertItem.id)}`;
       const sessionCount = new Set(data.context_events.map(event => event.session_id)).size;
       const rows = data.context_events.map((event, index, events) => {
         const sessionChanged = index > 0 && event.session_id !== events[index - 1].session_id;
@@ -437,9 +610,9 @@
           <td>${escapeHtml(event.session_id)}</td>
         </tr>`;
       }).join('');
-      document.querySelector('#alert-detail-body').innerHTML = `
+      const technical = `
         <div class="detail-grid">
-          <div class="detail-item"><span>查看确认状态</span><strong>${alertStatusLabel(alertItem.status)} (${escapeHtml(alertItem.status)})</strong></div>
+          <div class="detail-item"><span>查看状态</span><strong>${alertStatusLabel(alertItem.status)} (${escapeHtml(alertItem.status)})</strong></div>
           <div class="detail-item"><span>人工报警标记</span><strong>${alarmMarkLabel(alertItem.alarm_required)}</strong></div>
           <div class="detail-item"><span>触发分数 / 阈值</span><strong>${pct(trigger.fall_probability)} / ${pct(trigger.threshold)}</strong></div>
           <div class="detail-item"><span>板端状态</span><strong>${escapeHtml(trigger.state)}</strong></div>
@@ -448,17 +621,34 @@
           <div class="detail-item"><span>设备运行时间</span><strong>${duration(trigger.uptime_ms)}</strong></div>
           <div class="detail-item"><span>模型</span><strong>${escapeHtml(trigger.model_version)}</strong></div>
           <div class="detail-item"><span>Pipeline</span><strong>${escapeHtml(trigger.pipeline_version)}</strong></div>
-          <div class="detail-item"><span>查看确认记录</span><strong>${statusDetail}</strong></div>
+          <div class="detail-item"><span>查看记录时间 / 操作员</span><strong>${statusDetail}</strong></div>
           <div class="detail-item"><span>报警标记记录</span><strong>${alarmDetail}</strong></div>
         </div>
         ${evidenceHtml(data.evidence,alertItem.id)}
-        <div class="note-editor">
-          <h2>人工判断备注</h2>
-          <p class="detail-note">类别和备注只记录人工判断，不自动改变确认或报警标记。</p>
-          <label>操作员名称<input id="detail-operator-name" type="text" maxlength="100" ${pending}
-            value="${escapeHtml(document.querySelector('#operator-name').value)}" placeholder="建议填写组员编号"
+        <h2>同设备前后事件</h2>
+        <p class="detail-note">显示报警前 ${context.returned_before}/${context.available_before} 条、报警后 ${context.returned_after}/${context.available_after} 条；红色行为报警触发事件。不同设备的数据不会混入。</p>
+        ${sessionCount > 1 ? `<p class="detail-note">本段记录包含 ${sessionCount} 个 Session，按服务器接收顺序排列；跨会话记录不能视为同一次连续运行。</p>` : ''}
+        <div class="table-wrap"><table>
+          <thead><tr><th>位置</th><th>接收时间</th><th>状态</th><th>分数</th><th>Sequence</th><th>Session</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>`;
+      const followup = data.evidence?.first_post_trigger_state
+        ? '这条提醒之后仍有检测数据传来。' : '目前缺少足够的后续记录。';
+      document.querySelector('#alert-detail-body').innerHTML = `
+        <div class="summary-panel"><h3>疑似跌倒记录</h3>
+          <p class="card-meta">${shortTime(trigger.received_at)} · ${escapeHtml(alertItem.device_id)}</p>
+          <p>系统记录到一次疑似跌倒信号。${followup}是否真的跌倒，需要结合当时情况核实。</p>
+          <p>查看状态：${alertStatusLabel(alertItem.status)}<br>处理决定：${alarmMarkLabel(alertItem.alarm_required)}</p></div>
+        <div class="processing-actions"><label>操作员名称<input id="detail-operator-name" type="text" maxlength="100" ${pending}
+            value="${escapeHtml(document.querySelector('#operator-name').value)}" placeholder="填写组员编号"
             oninput="document.querySelector('#operator-name').value=this.value; rememberOperator()"></label>
-          <p class="detail-note">备注和历史沿用页面的公开读取权限，请勿填写电话、住址或真实健康信息。</p>
+          <p class="detail-note">用于记录操作，由本人填写，不是登录身份认证。</p>
+          <div class="actions">${actionButtons(alertItem,false)}</div>
+          <p class="detail-note">“已查看”只表示看过记录；“标记需要报警”只记录决定，不会发送通知。未标记不表示排除跌倒。</p></div>
+        <div class="note-editor">
+          <h2>记录处理情况</h2>
+          <p class="detail-note">保存备注不会自动改变查看状态或需要报警标记。</p>
+          <p class="detail-note">备注可被页面访问者读取，请用组员编号，避免填写个人信息。</p>
           <label>判断类别<select id="judgment-category" ${pending} onchange="captureNoteDraft()">
             ${Object.entries(categories).map(([value,label]) => `<option value="${value}" ${draft.category === value ? 'selected' : ''}>${label}</option>`).join('')}
           </select></label>
@@ -468,22 +658,15 @@
           <span class="muted">最多 1000 字符，需点击保存。${alertItem.note_updated_at
             ? `最近保存：${time(alertItem.note_updated_at)} · ${escapeHtml(alertItem.note_updated_by)}` : '尚无备注保存记录。'}</span>
         </div>
-        <details>
+        <details ${panelStates.get(`alert-history-${Number(alertItem.id)}`) ? 'open' : ''}
+          ontoggle="rememberPanel('alert-history-${Number(alertItem.id)}',this.open)">
           <summary>操作历史（最近 ${operations.length} 条 / 共 ${Number(data.operations_total || 0)} 条）</summary>
           <p class="detail-note">新版本启用后记录操作，包括撤销和备注旧值；历史升级前的操作不会补造。操作员名称由本人填写。</p>
           <div class="history-table"><table><thead><tr><th>操作时间</th><th>操作员</th><th>操作</th><th>前后变化</th></tr></thead>
             <tbody>${historyRows || '<tr><td colspan="4" class="muted">尚无操作历史。</td></tr>'}</tbody></table></div>
         </details>
-        <h2>同设备前后事件</h2>
-        <p class="detail-note">显示报警前 ${context.returned_before}/${context.available_before} 条、报警后 ${context.returned_after}/${context.available_after} 条；红色行为报警触发事件。不同设备的数据不会混入。</p>
-        ${sessionCount > 1 ? `<p class="detail-note">本段记录包含 ${sessionCount} 个 Session，按服务器接收顺序排列；跨会话记录不能视为同一次连续运行。</p>` : ''}
-        <div class="table-wrap"><table>
-          <thead><tr><th>位置</th><th>接收时间</th><th>状态</th><th>分数</th><th>Sequence</th><th>Session</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table></div>
-        <p class="detail-note">“已确认”表示已查看此记录；“已报警”表示人工判断需要报警。两项可独立切换，仅保存标记，不会发送通知。“未报警”不表示排除跌倒。</p>
+        ${technicalPanel(`alert-tech-${Number(alertItem.id)}`,technical)}
         <div class="detail-footer actions">
-          ${actionButtons(alertItem, false)}
           <button class="secondary" onclick="closeAlertDetail()">关闭</button>
         </div>`;
     }
@@ -497,7 +680,7 @@
         renderAlertDetail(data);
       } catch (error) {
         if (detailAlertId !== id) return;
-        document.querySelector('#alert-detail-body').innerHTML = `<p class="error">详情加载失败：${escapeHtml(error.message)}</p>`;
+        document.querySelector('#alert-detail-body').innerHTML = '<p class="error">暂时无法加载这条记录，请关闭后重新打开。</p>';
       }
     }
 
@@ -539,11 +722,11 @@
         lastSuccessfulRefreshMs=Date.now(); refreshSucceeded=true;
         render();
         if (detailIncidentId != null) loadIncidentDetail(detailIncidentId);
-        document.querySelector('#message').textContent = `最后刷新：${new Date().toLocaleTimeString()}`;
+        document.querySelector('#message').textContent = `页面已更新 · ${new Date().toLocaleTimeString()}`;
       } catch (error) {
         if (requestId !== refreshRequestId) return;
         refreshSucceeded=false; render();
-        document.querySelector('#message').textContent = `刷新失败：${error.message}；当前上报状态未知`;
+        document.querySelector('#message').textContent = '页面暂时无法更新，正在重试。当前设备情况无法确认。';
       }
     }
 
@@ -552,11 +735,11 @@
       if (!confirm(message)) return;
       const operator = document.querySelector('#operator-name').value.trim();
       if (!operator || operator.length > 100) {
-        alert('请先填写操作员名称（1–100 字符），以便记录操作历史。');
+        alert('请先在记录详情中填写操作员名称（组员编号，1–100 字符），以便保存处理记录。');
         return false;
       }
       rememberOperator();
-      const apiKey = sessionStorage.getItem('fall_api_key') || prompt('请输入当前服务的 X-API-Key（仅在本机输入）');
+      const apiKey = sessionStorage.getItem('fall_api_key') || prompt('请输入当前服务的操作密钥（仅在本机输入）');
       if (!apiKey) return;
       sessionStorage.setItem('fall_api_key', apiKey);
       captureNoteDraft();
@@ -570,7 +753,8 @@
         });
         if (!response.ok) {
           if (response.status === 401) sessionStorage.removeItem('fall_api_key');
-          throw new Error(response.status === 409 ? '备注已被其他操作修改。你的草稿已保留，请重新加载已保存备注并核对后再保存。' : `HTTP ${response.status}`);
+          throw new Error(response.status === 409 ? '备注已被其他操作修改。你的草稿已保留，请重新加载已保存备注并核对后再保存。'
+            : response.status === 401 ? '操作密钥不正确或已失效，请重新输入。' : '服务未能保存这次操作，请稍后重试。');
         }
         const result = await response.json();
         if (path === 'note') noteDrafts.delete(id);
@@ -581,7 +765,9 @@
         if (detailAlertId === id) await loadAlertDetail(id);
         return true;
       } catch (error) {
-        alert(`状态更新失败：${error.message}`);
+        const message = /备注已被其他操作修改|操作密钥不正确|服务未能保存/.test(error.message)
+          ? error.message : '暂时无法保存，请检查网络后重试。未保存的备注仍保留在当前页面。';
+        alert(`保存失败：${message}`);
         return false;
       } finally {
         pendingAlerts.delete(id);
@@ -592,12 +778,12 @@
 
     function setReview(id, confirmed) {
       return updateAlertMark(id, 'review', {confirmed},
-        `将报警 #${Number(id)} 改为“${confirmed ? '已确认' : '未确认'}”？\n\n此状态表示是否已查看确认记录，不代表确认发生跌倒或人员安全，也不会改变人工报警标记。`);
+        `${confirmed ? '将这条记录标记为已查看' : '撤销这条记录的已查看标记'}？\n\n这只表示是否看过记录，不确认真实跌倒，也不会改变需要报警的标记。`);
     }
 
     function setAlarmMark(id, alarmRequired) {
       return updateAlertMark(id, 'alarm-mark', {alarm_required:alarmRequired},
-        `将报警 #${Number(id)} 改为“${alarmMarkLabel(alarmRequired)}”？\n\n这是人工判断是否需要报警的标记，仅保存到系统，不会发送通知或触发蜂鸣器，也不会改变查看确认状态。`);
+        `${alarmRequired ? '标记这条记录需要报警' : '取消这条记录的需要报警标记'}？\n\n这里只保存处理决定，不会发送通知或触发蜂鸣器，也不会改变查看状态。`);
     }
 
     function saveJudgmentNote(id) {
@@ -608,7 +794,7 @@
         alert('判断备注不能超过 1000 字符。'); return;
       }
       return updateAlertMark(id, 'note', draft,
-        `保存报警 #${Number(id)} 的判断类别和备注？\n\n这不会改变查看确认或人工报警标记。`);
+        '保存这条记录的处理备注？\n\n这不会改变查看状态或需要报警的标记。');
     }
 
     async function reloadJudgmentNote(id) {
@@ -624,7 +810,7 @@
         noteDrafts.delete(id);
         detailAlertData = data;
         renderAlertDetail(data);
-      } catch (error) { alert(`重新加载失败，草稿已保留：${error.message}`); }
+      } catch (error) { alert('暂时无法重新加载。草稿已保留，请稍后重试。'); }
       finally {
         pendingAlerts.delete(id);
         render();
@@ -633,7 +819,7 @@
     }
 
     async function changeIncidentFilters() {
-      incidentLimit=50; render();
+      incidentLimit=50; reminderDisplayLimit=3; render();
       if (refreshInFlight) { refreshRequestId++; await refreshInFlight; }
       await refresh();
     }
@@ -644,6 +830,12 @@
     });
     document.querySelector('#incident-detail-dialog').addEventListener('click', event => {
       if (event.target === event.currentTarget) closeIncidentDetail();
+    });
+    document.querySelector('#device-detail-dialog').addEventListener('close', () => {
+      if (!document.querySelector('#device-detail-dialog').open) detailDeviceId=null;
+    });
+    document.querySelector('#device-detail-dialog').addEventListener('click', event => {
+      if (event.target === event.currentTarget) closeDeviceDetail();
     });
     document.querySelector('#alert-detail-dialog').addEventListener('close', () => {
       if (document.querySelector('#alert-detail-dialog').open) return;

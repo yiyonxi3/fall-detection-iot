@@ -11,6 +11,7 @@ from typing import Annotated, Literal
 
 import event_evidence
 import incident_engine
+import workflow
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, StringConstraints, model_validator
@@ -25,7 +26,7 @@ DEVICE_OFFLINE_SECONDS = int(os.getenv("DEVICE_OFFLINE_SECONDS", "30"))
 app = FastAPI(
     title="IoT Fall Detection API",
     description="Nano performs inference; this server receives, stores and displays results.",
-    version="0.9.0",
+    version="0.10.0",
 )
 
 
@@ -141,6 +142,7 @@ def initialise_database() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_operations_alert ON alert_operations(alert_id, id DESC)")
         event_evidence.initialise(conn)
         incident_engine.initialise(conn, DEVICE_OFFLINE_SECONDS)
+        workflow.initialise(conn)
         conn.commit()
 
 
@@ -150,6 +152,8 @@ def to_dict(row: sqlite3.Row) -> dict:
         item["is_test"] = bool(item["is_test"])
     if "alarm_required" in item:
         item["alarm_required"] = bool(item["alarm_required"])
+    if "processing_complete" in item:
+        item["processing_complete"] = bool(item["processing_complete"])
     return item
 
 
@@ -177,7 +181,7 @@ def record_operation(conn, alert_id, action, operated_at, operated_by, before, a
     """Append human-field snapshots in the SAME transaction as the alert update."""
     fields = ("status", "acknowledged_at", "acknowledged_by", "alarm_required",
               "alarm_marked_at", "alarm_marked_by", "judgment_category", "judgment_note",
-              "note_revision", "note_updated_at", "note_updated_by")
+              "note_revision", "note_updated_at", "note_updated_by", "processing_complete", "processed_at", "processed_by")
     snapshots = [json.dumps({key: item[key] for key in fields}, ensure_ascii=False)
                  for item in (to_dict(before), to_dict(after))]
     conn.execute("""INSERT INTO alert_operations
@@ -267,7 +271,8 @@ def receive_telemetry(data: TelemetryRequest, response: Response):
 @app.get("/api/v1/incidents")
 def list_incidents(device_id: str | None = None, hide_tests: bool = False,
                    open_only: bool = False, limit: int = Query(50, ge=1, le=200),
-                   before_id: int | None = Query(None, ge=1)):
+                   before_id: int | None = Query(None, ge=1),
+                   workflow_state: Literal["UNREAD", "VERIFY", "COMPLETED", "PENDING"] | None = None):
     conditions, params = [], []
     if device_id:
         conditions.append("i.device_id=?"); params.append(device_id)
@@ -277,6 +282,16 @@ def list_incidents(device_id: str | None = None, hide_tests: bool = False,
         conditions.append("a.is_test=0")
     if open_only:
         conditions.append("EXISTS (SELECT 1 FROM incident_alerts m JOIN alerts x ON x.id=m.alert_id WHERE m.incident_id=i.id AND x.status='OPEN')")
+    unread = "EXISTS (SELECT 1 FROM incident_alerts m JOIN alerts x ON x.id=m.alert_id WHERE m.incident_id=i.id AND x.status='OPEN')"
+    unfinished = "EXISTS (SELECT 1 FROM incident_alerts m JOIN alerts x ON x.id=m.alert_id WHERE m.incident_id=i.id AND x.processing_complete=0)"
+    if workflow_state == "UNREAD":
+        conditions.append(unread)
+    elif workflow_state == "VERIFY":
+        conditions.append(f"NOT ({unread}) AND ({unfinished})")
+    elif workflow_state == "COMPLETED":
+        conditions.append(f"NOT ({unread}) AND NOT ({unfinished})")
+    elif workflow_state == "PENDING":
+        conditions.append(f"(({unread}) OR ({unfinished}))")
     query = "SELECT i.id FROM incidents i JOIN alerts a ON a.id=i.first_alert_id"
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
@@ -298,7 +313,21 @@ def incident_detail(incident_id: int):
             raise HTTPException(status_code=404, detail="Incident not found")
         result["current_monitoring"] = event_evidence.reporting_health(
             conn, result["device_id"], stamp, DEVICE_OFFLINE_SECONDS)
+        result["workflow_operations"] = workflow.history(conn, incident_id)
         return result
+
+
+@app.patch("/api/v1/incidents/{incident_id}/workflow", dependencies=[Depends(require_api_key)])
+def update_workflow(incident_id: int, data: workflow.WorkflowRequest):
+    with closing(db_connection()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        stamp = now()
+        changed = workflow.apply(conn, incident_id, data, stamp, record_operation)
+        result = incident_engine.read(conn, incident_id, stamp)
+        result["current_monitoring"] = event_evidence.reporting_health(conn, result["device_id"], stamp, DEVICE_OFFLINE_SECONDS)
+        result["workflow_operations"] = workflow.history(conn, incident_id)
+        conn.commit()
+    return {"status": changed, "incident": result}
 
 
 @app.get("/api/v1/devices/{device_id}/latest")
@@ -418,6 +447,7 @@ def alert_context(
             "SELECT COUNT(*) FROM alert_operations WHERE alert_id=?", (alert_id,),
         ).fetchone()[0]
         evidence = event_evidence.read_evidence(conn, alert_id)
+        membership = conn.execute("SELECT incident_id FROM incident_alerts WHERE alert_id=?", (alert_id,)).fetchone()
 
     alert = to_dict(alert_row)
     trigger_event = to_dict(trigger_row)
@@ -430,6 +460,7 @@ def alert_context(
     ]
     return {
         "alert": alert,
+        "incident_id": membership["incident_id"] if membership else None,
         "trigger_event": trigger_event,
         "context_events": context_events,
         "operations": [operation_dict(row) for row in operation_rows],
@@ -472,12 +503,16 @@ def set_review_status(alert_id: int, confirmed: bool, updated_by: str) -> dict:
             return {"status": "unchanged", "alert": to_dict(alert)}
         changed_at = now()
         conn.execute("""
-            UPDATE alerts SET status=?, acknowledged_at=?, acknowledged_by=?
+            UPDATE alerts SET status=?, acknowledged_at=?, acknowledged_by=?,
+                processing_complete=CASE WHEN ? THEN processing_complete ELSE 0 END,
+                processed_at=CASE WHEN ? THEN processed_at ELSE NULL END,
+                processed_by=CASE WHEN ? THEN processed_by ELSE NULL END
             WHERE id=?
         """, (target_status, changed_at if confirmed else None,
-              updated_by if confirmed else None, alert_id))
+              updated_by if confirmed else None, confirmed, confirmed, confirmed, alert_id))
         updated = conn.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
         record_operation(conn, alert_id, "REVIEW", changed_at, updated_by, alert, updated)
+        workflow.legacy_change(conn, alert, updated, "REVIEW", changed_at, updated_by)
         conn.commit()
     return {"status": "updated", "alert": to_dict(updated)}
 
@@ -505,11 +540,15 @@ def mark_alarm(alert_id: int, data: AlarmMarkRequest):
             return {"status": "unchanged", "alert": to_dict(alert)}
         changed_at = now()
         conn.execute("""
-            UPDATE alerts SET alarm_required=?, alarm_marked_at=?, alarm_marked_by=?
+            UPDATE alerts SET alarm_required=?, alarm_marked_at=?, alarm_marked_by=?,
+                processing_complete=CASE WHEN ? THEN 0 ELSE processing_complete END,
+                processed_at=CASE WHEN ? THEN NULL ELSE processed_at END,
+                processed_by=CASE WHEN ? THEN NULL ELSE processed_by END
             WHERE id=?
-        """, (int(data.alarm_required), changed_at, data.updated_by, alert_id))
+        """, (int(data.alarm_required), changed_at, data.updated_by, data.alarm_required, data.alarm_required, data.alarm_required, alert_id))
         updated = conn.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
         record_operation(conn, alert_id, "ALARM_MARK", changed_at, data.updated_by, alert, updated)
+        workflow.legacy_change(conn, alert, updated, "ALARM_MARK", changed_at, data.updated_by, clear_handling=data.alarm_required)
         conn.commit()
     return {"status": "updated", "alert": to_dict(updated)}
 
@@ -527,10 +566,12 @@ def update_note(alert_id: int, data: NoteRequest):
             raise HTTPException(status_code=409, detail="Note changed; reload before saving")
         changed_at = now()
         conn.execute("""UPDATE alerts SET judgment_category=?, judgment_note=?,
-            note_revision=note_revision+1, note_updated_at=?, note_updated_by=? WHERE id=?""",
+            note_revision=note_revision+1, note_updated_at=?, note_updated_by=?,
+            processing_complete=0, processed_at=NULL, processed_by=NULL WHERE id=?""",
             (data.category, data.note, changed_at, data.updated_by, alert_id))
         updated = conn.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
         record_operation(conn, alert_id, "NOTE", changed_at, data.updated_by, alert, updated)
+        workflow.legacy_change(conn, alert, updated, "NOTE", changed_at, data.updated_by)
         conn.commit()
     return {"status": "updated", "alert": to_dict(updated)}
 

@@ -92,6 +92,17 @@
     .warning-text { color:#fcd34d; }
     .processing-actions { padding:14px; background:#15243c; border-radius:10px; margin-bottom:18px; }
     @media(max-width:700px){ .table-wrap{overflow:auto} .stats{grid-template-columns:repeat(2,1fr)} }
+    [hidden] { display:none !important; }
+    .workflow-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+    .workflow-grid label,.workflow-note { display:grid; gap:7px; color:#b9c7dc; font-size:14px; }
+    .workflow-note { margin-top:14px; } .workflow-note textarea { min-height:82px; width:100%; resize:vertical; }
+    .workflow-actions { justify-content:flex-end; margin-top:16px; }
+    .workflow-filters { display:flex; gap:8px; flex-wrap:wrap; margin:14px 0; }
+    .workflow-filters button[aria-pressed=true] { background:#214774; outline:1px solid #82b8ff; }
+    .workflow-note-cell { white-space:pre-wrap; overflow-wrap:anywhere; }
+    #workflow-message { color:#fcd34d; margin:12px 0; } #workflow-message:empty { display:none; }
+    #incident-detail-dialog { width:min(800px,calc(100vw - 32px)); }
+    @media(max-width:600px){ .workflow-grid{grid-template-columns:1fr} }
   </style>
 </head>
 <body>
@@ -101,18 +112,19 @@
     <div id="stats" class="stats"></div>
     <input id="operator-name" type="hidden">
     <section>
-      <div class="section-head"><h2>需要查看的提醒</h2><details><summary>筛选</summary><div class="controls">
+      <div class="section-head"><h2>需要继续关注</h2><details><summary>筛选</summary><div class="controls">
         <label><input id="hide-tests" type="checkbox"> 隐藏测试设备的记录</label>
-        <label><input id="open-only" type="checkbox"> 只看尚未全部查看的提醒</label>
+        <label><input id="open-only" type="checkbox"> 只加载待处理的提醒</label>
       </div></details></div>
       <p class="detail-note">提醒表示疑似跌倒，实际情况需要核实。</p>
+      <div id="workflow-filters" class="workflow-filters"></div>
       <div id="incidents" class="incident-grid"></div>
       <button id="reminder-more" class="secondary" onclick="toggleMoreReminders()" hidden>查看更多待查看提醒</button>
       <p id="incident-page-note" class="detail-note"></p>
       <button id="incident-more" class="secondary" onclick="loadMoreIncidents()">加载更早的提醒</button>
     </section>
-    <section><h2>设备状态</h2><div id="devices" class="grid"></div></section>
-    <section><details id="history-section"><summary>已查看的提醒</summary><div id="incident-history" class="incident-grid"></div></details>
+    <section><h2>设备状态</h2><p id="device-status-note" class="detail-note"></p><div id="devices" class="grid"></div></section>
+    <section><details id="history-section"><summary>已有处理结果</summary><p class="detail-note">人工明确完成的处理记录，不是系统确认人员安全。</p><div id="incident-history" class="incident-grid"></div></details>
       <details class="technical-panel"><summary>技术记录（最近 50 条原始候选）</summary><div class="table-wrap"><table>
       <thead><tr><th>设备</th><th>分数 / 阈值</th><th>接收时间</th><th>状态</th><th>操作</th></tr></thead>
       <tbody id="alerts"></tbody>
@@ -153,6 +165,10 @@
     let incidentMayHaveMore = true;
     let incidentLoading = false;
     let reminderDisplayLimit = 3;
+    let workflowFilter = 'PENDING';
+    const workflowLabels = {UNREAD:'待查看',VERIFY:'待核实',COMPLETED:'已有处理结果'};
+    const workflowScopes = new Map(), workflowDrafts = new Map(), pendingIncidents = new Set();
+    let workflowRendered = null;
     let detailIncidentId = null;
     let detailIncidentData = null;
     let incidentDetailRequestId = 0;
@@ -294,22 +310,28 @@
         <summary id="${key}-toggle">${label}</summary>${content}</details>`;
     }
 
+    function workflowState(item) {
+      if ((item.candidates || []).some(row=>row.status !== 'ACKNOWLEDGED') || item.review_state !== 'REVIEWED') return 'UNREAD';
+      return item.candidates?.length && item.candidates.every(row=>row.processing_complete) ? 'COMPLETED' : 'VERIFY';
+    }
+
     function reminderCard(item) {
       const story = incidentStory(item);
       const manual = humanRecordSummary(item.candidates || []);
+      const state = workflowState(item);
       const caveat = item.evidence?.state === 'INCOMPLETE' ? ' 后续记录不足。' : '';
-      return `<article class="card reminder-card ${item.requires_evidence_check ? 'invalid' : item.review_state === 'REVIEWED' ? '' : 'alarm'}">
-        <div class="card-head"><h3>疑似跌倒提醒</h3><span class="badge ${item.review_state === 'REVIEWED' ? 'offline' : 'test'}">${story.review}</span></div>
+      return `<article class="card reminder-card ${item.requires_evidence_check ? 'invalid' : state === 'COMPLETED' ? '' : 'alarm'}">
+        <div class="card-head"><h3>疑似跌倒提醒</h3><span class="badge ${state === 'COMPLETED' ? 'online' : 'offline'}">${workflowLabels[state]}</span></div>
         <p class="card-meta">${shortTime(item.created_at)} · ${escapeHtml(item.device_id)} ${testBadge(item.is_test)}</p>
         <p class="plain-summary">${escapeHtml(manual || story.lead+caveat)}</p>
         ${Number(item.alarm_marked_count) > 0 ? '<p class="warning-text">已有人标记需要报警，请查看处理记录。</p>' : ''}
         ${pageIsStale() ? '<p class="warning-text">页面未更新，后续情况等待刷新。</p>' : ''}
-        <div class="card-footer"><span class="muted">提醒 ${Number(item.id)}${manual ? ' · 人工填写' : ' · 尚待核实'}</span>
+        <div class="card-footer"><span class="muted">提醒 ${Number(item.id)}${manual ? ' · 人工填写' : ' · 尚待核实'}${Number(item.reviewed_count)>0 ? ` · ${story.review}` : ''}</span>
           <button id="reminder-button-${Number(item.id)}" onclick="showIncidentDetail(${Number(item.id)})">查看详情</button></div></article>`;
     }
 
     function incidentQuery(limit) {
-      return `/api/v1/incidents?limit=${limit}&hide_tests=${document.querySelector('#hide-tests').checked}&open_only=${document.querySelector('#open-only').checked}`;
+      return `/api/v1/incidents?limit=${limit}&hide_tests=${document.querySelector('#hide-tests').checked}${document.querySelector('#open-only').checked ? '&workflow_state=PENDING' : ''}`;
     }
 
     function incidentEvidenceHtml(item) {
@@ -325,14 +347,16 @@
     function renderIncidents() {
       const hideTests = document.querySelector('#hide-tests').checked;
       const openOnly = document.querySelector('#open-only').checked;
-      const items = incidentData.filter(item=>(!hideTests || !item.is_test) && (!openOnly || item.review_state !== 'REVIEWED'));
-      const pending = items.filter(item=>item.review_state !== 'REVIEWED');
-      const reviewed = items.filter(item=>item.review_state === 'REVIEWED');
+      const items = incidentData.filter(item=>(!hideTests || !item.is_test) && (!openOnly || workflowState(item) !== 'COMPLETED'));
+      const pending = items.filter(item=>workflowFilter === 'PENDING' ? workflowState(item) !== 'COMPLETED' : workflowState(item) === workflowFilter);
+      const reviewed = items.filter(item=>workflowState(item) === 'COMPLETED');
+      document.querySelector('#workflow-filters').innerHTML = [['PENDING','待处理'],['UNREAD','待查看'],['VERIFY','待核实']].map(([value,label])=>
+        `<button class="secondary" aria-pressed="${workflowFilter===value}" onclick="changeWorkflowFilter('${value}')">${label}</button>`).join('');
       document.querySelector('#incidents').innerHTML = pending.length ? pending.slice(0,reminderDisplayLimit).map(reminderCard).join('')
-        : `<p class="muted">${lastSuccessfulRefreshMs == null ? '正在加载提醒…' : '当前已加载记录中没有待查看的提醒。'}</p>`;
+        : `<p class="muted">${lastSuccessfulRefreshMs == null ? '正在加载提醒…' : '当前筛选的已加载记录中没有待处理提醒。'}</p>`;
       document.querySelector('#incident-history').innerHTML = reviewed.length ? reviewed.map(reminderCard).join('')
-        : '<p class="muted">当前筛选下没有已查看的提醒。</p>';
-      document.querySelector('#incident-page-note').textContent = `已加载 ${incidentData.length} 条提醒，其中 ${pending.length} 条待查看。更早的记录可继续加载。`;
+        : '<p class="muted">当前筛选下没有明确完成的处理记录。</p>';
+      document.querySelector('#incident-page-note').textContent = `已加载 ${incidentData.length} 条提醒，当前显示 ${pending.length} 条待处理。计数不是全库总数，更早记录可继续加载。`;
       document.querySelector('#reminder-more').hidden = pending.length <= 3;
       document.querySelector('#reminder-more').textContent = reminderDisplayLimit === 3
         ? `展开其余 ${Math.max(0,pending.length-3)} 条已加载提醒` : '收起更多提醒';
@@ -342,12 +366,48 @@
     }
 
     function toggleMoreReminders() { reminderDisplayLimit = reminderDisplayLimit === 3 ? 200 : 3; renderIncidents(); }
+    function changeWorkflowFilter(value) { if (!['PENDING','UNREAD','VERIFY'].includes(value)) return; workflowFilter=value; reminderDisplayLimit=3; renderIncidents(); }
 
     async function loadMoreIncidents() {
       if (incidentLoading || incidentLimit >= 200 || !incidentMayHaveMore) return;
       incidentLoading = true; incidentLimit = Math.min(200,incidentLimit+50); renderIncidents();
       try { if (refreshInFlight) await refreshInFlight; await refresh(); }
       finally { incidentLoading = false; renderIncidents(); }
+    }
+
+    function defaultWorkflowScope(item) {
+      if (workflowState(item) === 'COMPLETED') return 'all';
+      if (item.candidates.some(row=>row.processing_complete) && item.candidates.some(row=>!row.processing_complete)) return 'pending';
+      const signatures = new Set(item.candidates.map(row=>JSON.stringify([row.judgment_category || 'UNASSESSED',row.judgment_note || ''])));
+      return signatures.size > 1 ? '' : 'all';
+    }
+    function selectedWorkflowRows(item=detailIncidentData) {
+      if (!item) return [];
+      const scope=workflowScopes.get(item.id) ?? defaultWorkflowScope(item);
+      return scope==='all' ? item.candidates : scope==='pending' ? item.candidates.filter(row=>!row.processing_complete)
+        : item.candidates.filter(row=>'r:'+row.id===scope);
+    }
+    function workflowDraftKey(item=detailIncidentData) { return item ? `${item.id}:${workflowScopes.get(item.id) ?? defaultWorkflowScope(item)}` : ''; }
+    function captureWorkflowDraft() {
+      if (!detailIncidentData || !workflowRendered || workflowRendered.key !== workflowDraftKey()) return;
+      const category=document.querySelector('#workflow-category')?.value;
+      if (!Object.prototype.hasOwnProperty.call(categories,category)) return;
+      const values={category,note:document.querySelector('#workflow-note')?.value || '',handling:document.querySelector('#workflow-handling')?.value || ''};
+      const existing=workflowDrafts.get(workflowRendered.key);
+      if (existing || Object.entries(values).some(([key,value])=>value!==workflowRendered.values[key]))
+        workflowDrafts.set(workflowRendered.key,{...existing,...values,baseRevision:existing?.baseRevision ?? workflowRendered.revision,
+          memberIds:existing?.memberIds || workflowRendered.memberIds});
+    }
+    function changeWorkflowScope(value) {
+      if (!detailIncidentData) return; captureWorkflowDraft();
+      if (!['','all','pending',...detailIncidentData.candidates.map(row=>'r:'+row.id)].includes(value)) return;
+      workflowScopes.set(detailIncidentData.id,value); renderIncidentDetail(detailIncidentData);
+    }
+    function workflowMessage(value) { const node=document.querySelector('#workflow-message'); if(node) node.textContent=value; }
+    async function reloadWorkflowForm() {
+      if (detailIncidentId==null || !confirm('放弃当前提醒的未保存草稿并重新加载最新记录？')) return;
+      for (const key of workflowDrafts.keys()) if(key.startsWith(detailIncidentId+':')) workflowDrafts.delete(key);
+      workflowRendered=null; workflowScopes.delete(detailIncidentId); await loadIncidentDetail(detailIncidentId);
     }
 
     function renderIncidentDetail(item) {
@@ -373,29 +433,124 @@
         ${monitoringHtml({monitoring:item.current_monitoring})}
         <p class="detail-note">以上监测状态是当前查询结果；事件证据是历史观察。已经完成的历史观察不会因后来设备离线而变成中断。</p>
         <button class="secondary" onclick="downloadIncident(${Number(item.id)})">下载事件分析 JSON</button>`;
-      const records = `<p class="plain-summary">${escapeHtml(story.lead)}</p><p class="plain-summary">${escapeHtml(story.followup)}</p>
-        <p class="detail-note">时间接近不确认是同一次动作；设备评分不能确认真实跌倒。</p>
-        <h2>查看与处理记录</h2>
-        <p class="detail-note">${story.review}。在对应记录中查看、填写核实说明或标记需要报警。</p>
-        <div class="record-list">${item.candidates.map(candidate=>`<article class="record-row"><div>
-          <strong>记录 ${Number(candidate.id)} · ${shortTime(candidate.received_at)}</strong>
-          <p>${alertStatusLabel(candidate.status)} · ${alarmMarkLabel(candidate.alarm_required)}</p>
-          <p>人工记录：${escapeHtml(categoryLabel(candidate.judgment_category || 'UNASSESSED'))}</p>
-          ${candidate.judgment_note ? `<p>核实说明：${escapeHtml(candidate.judgment_note)}</p>` : '<p class="muted">尚未填写核实说明。</p>'}
-          </div><button id="record-button-${Number(candidate.id)}" class="secondary" onclick="openIncidentCandidate(${Number(candidate.id)})">查看并处理</button></article>`).join('')}</div>
-        <p class="detail-note">“已查看”只表示看过记录；报警标记只记录处理决定，不会发送通知。</p>
-        <div class="summary-panel"><h3>设备现在的情况</h3><p>${escapeHtml(current.headline)}：${escapeHtml(current.description)}</p>
-          <p class="detail-note">这是现在的设备状态，不代表历史提醒发生时的情况。</p></div>`;
+      if (!workflowScopes.has(item.id)) workflowScopes.set(item.id,defaultWorkflowScope(item));
+      const scope=workflowScopes.get(item.id), rows=selectedWorkflowRows(item), key=workflowDraftKey(item), draft=workflowDrafts.get(key);
+      const mixed=new Set(rows.map(row=>JSON.stringify([row.judgment_category || 'UNASSESSED',row.judgment_note || '']))).size>1;
+      const values={category:draft?.category ?? (!mixed && rows.length ? rows[0].judgment_category || 'UNASSESSED' : 'UNASSESSED'),
+        note:draft?.note ?? (!mixed && rows.length ? rows[0].judgment_note || '' : ''),handling:draft?.handling ?? (item.handling_note || '')};
+      const staleDraft=draft && (draft.baseRevision!==item.workflow_revision || JSON.stringify([...draft.memberIds].sort((a,b)=>a-b))!==JSON.stringify(item.candidates.map(row=>row.id).sort((a,b)=>a-b)));
+      const completed=workflowState(item)==='COMPLETED', busy=pendingIncidents.has(item.id), disabled=busy?'disabled':'';
+      const viewed=rows.length ? rows.every(row=>row.status==='ACKNOWLEDGED') : item.candidates.every(row=>row.status==='ACKNOWLEDGED');
+      const source=`<div class="table-wrap"><table><thead><tr><th>记录</th><th>查看 / 处理</th><th>人工核实说明</th><th>详情</th></tr></thead><tbody>
+        ${item.candidates.map(row=>`<tr><td>${Number(row.id)}</td><td>${alertStatusLabel(row.status)} / ${row.processing_complete?'已完成':'待处理'}</td>
+          <td class="workflow-note-cell">${escapeHtml(categoryLabel(row.judgment_category || 'UNASSESSED'))}<br>${escapeHtml(row.judgment_note || '暂无说明')}</td>
+          <td><button id="record-button-${Number(row.id)}" class="secondary" onclick="openIncidentCandidate(${Number(row.id)})">查看原记录</button></td></tr>`).join('')}</tbody></table></div>
+        <p class="detail-note">只修改所选记录，时间接近不确认是同一次动作。</p>`;
+      const history=item.workflow_operations || {items:[],total:0};
+      const actionLabels={REVIEW:'标记已查看',UNREVIEW:'撤销已查看',SAVE:'保存进度',FINISH:'保存并完成',REOPEN:'重新核实',ALARM_MARK:'报警标记',ALARM_CLEAR:'取消报警标记',NOTE:'修改原记录说明'};
+      const historyHtml=`<p class="detail-note">只记录新流程启用后的操作，不补造历史。操作员编号由本人填写。</p><div class="table-wrap"><table><thead><tr><th>时间 / 组员</th><th>操作 / 所选记录</th><th>前后快照</th></tr></thead><tbody>
+        ${history.items.map(op=>`<tr><td>${time(op.operated_at)}<br>${escapeHtml(op.operated_by)}</td><td>${escapeHtml(actionLabels[op.action] || op.action)}<br>${escapeHtml((op.selected_alert_ids || []).join(', '))}</td>
+          <td><details><summary>查看变更</summary><pre>${escapeHtml(JSON.stringify({before:op.before,after:op.after},null,2))}</pre></details></td></tr>`).join('') || '<tr><td colspan="3">暂无操作记录。</td></tr>'}</tbody></table></div>`;
       document.querySelector('#incident-detail-body').innerHTML = `
-        <div class="summary-panel"><div class="card-head"><h3>疑似跌倒提醒</h3><span class="badge offline">${story.review}</span></div>
-          <p class="card-meta">提醒时间：${shortTime(item.created_at)}<br>设备：${escapeHtml(item.device_id)} ${testBadge(item.is_test)}</p>
-          <p class="plain-summary">${escapeHtml(manual || story.lead)}</p>
-          <p class="detail-note">${manual ? '以上为人工填写的记录，不是系统自动确认的结论。' : '实际情况尚待核实。'}</p>
-          ${Number(item.alarm_marked_count) > 0 ? '<p class="warning-text">已有人标记需要报警，请查看处理记录。</p>' : ''}
-          ${pageIsStale() ? '<p class="warning-text">页面未更新，后续情况等待刷新。</p>' : ''}</div>
-        ${recordDetailsPanel(`incident-records-${Number(item.id)}`,'查看详细经过与各条记录',records)}
-        ${technicalPanel(`incident-tech-${Number(item.id)}`,technical)}`;
+        <div class="card-head"><p class="card-meta">${shortTime(item.created_at)} · ${escapeHtml(item.device_id)} ${testBadge(item.is_test)} · ${workflowLabels[workflowState(item)]}</p>
+          <button id="workflow-view" class="secondary" ${busy || !rows.length || viewed ? 'disabled' : ''} onclick="performWorkflow('REVIEW')">${viewed?'已查看':`标记已查看${rows.length>1?'（'+rows.length+' 条）':''}`}</button></div>
+        <div class="summary-panel"><p class="plain-summary">${escapeHtml(manual || story.lead)}</p></div>
+        ${pageIsStale() ? '<p class="warning-text">页面未更新，当前数据等待刷新。</p>' : ''}
+        <div id="workflow-editor" ${completed?'hidden':''}>
+          <div class="workflow-grid"><label>本次处理范围<select id="workflow-scope" ${disabled} onchange="changeWorkflowScope(this.value)">
+            <option value="" ${scope===''?'selected':''}>请选择处理范围</option><option value="all" ${scope==='all'?'selected':''}>整条提醒（${item.candidates.length} 条记录）</option>
+            ${item.candidates.some(row=>row.processing_complete) || scope==='pending' ? `<option value="pending" ${scope==='pending'?'selected':''}>尚未完成的记录（${item.candidates.filter(row=>!row.processing_complete).length} 条）</option>`:''}
+            ${item.candidates.length>1?item.candidates.map(row=>`<option value="r:${Number(row.id)}" ${scope==='r:'+row.id?'selected':''}>仅记录 ${Number(row.id)}</option>`).join(''):''}</select></label>
+          <label>核实结果<select id="workflow-category" ${disabled}>${Object.entries(categories).map(([value,label])=>`<option value="${value}" ${values.category===value?'selected':''}>${label}</option>`).join('')}</select></label></div>
+          ${!rows.length || mixed ? '<p class="detail-note">已有说明不同，请选择记录；替换已有内容前会要求确认。</p>':''}
+          ${staleDraft ? '<p class="warning-text">记录已更新，草稿仍保留。请核对并重新加载，不能直接覆盖。</p>':''}
+          <label class="workflow-note">核实说明<textarea id="workflow-note" maxlength="1000" ${disabled} placeholder="填写实际情况，避免个人敏感信息。">${escapeHtml(values.note)}</textarea></label>
+          <label id="workflow-handling-field" class="workflow-note" ${Number(item.alarm_marked_count)>0?'':'hidden'}>后续处理情况 · 整条提醒<textarea id="workflow-handling" maxlength="1000" ${disabled} placeholder="已标记需要报警，请记录实际后续处理。">${escapeHtml(values.handling)}</textarea></label>
+          <div class="actions workflow-actions"><button id="workflow-save" class="secondary" ${busy || !rows.length?'disabled':''} onclick="performWorkflow('SAVE')">保存进度</button>
+            <button id="workflow-finish" ${busy || !rows.length?'disabled':''} onclick="performWorkflow('FINISH')">保存并完成</button></div></div>
+        ${completed ? `<button id="workflow-reopen" class="secondary" ${disabled} onclick="performWorkflow('REOPEN',true)">重新核实整条提醒</button>` : ''}
+        <div id="workflow-message" role="status" aria-live="polite"></div>
+        ${recordDetailsPanel(`incident-records-${Number(item.id)}`,`查看原始记录（${item.candidates.length} 条）`,source)}
+        ${technicalPanel(`incident-tech-${Number(item.id)}`,technical)}
+        ${recordDetailsPanel(`incident-settings-${Number(item.id)}`,'更多操作与处理设置',`<label class="workflow-note">操作员编号<input id="workflow-operator" type="text" maxlength="100" ${disabled}
+          value="${escapeHtml(document.querySelector('#operator-name').value)}" oninput="document.querySelector('#operator-name').value=this.value; rememberOperator()"></label>
+          <div class="actions"><button class="secondary" ${busy || !rows.length?'disabled':''} onclick="performWorkflow('${rows.length && rows.every(row=>row.alarm_required)?'ALARM_CLEAR':'ALARM_MARK'}')">${rows.length && rows.every(row=>row.alarm_required)?'取消所选报警标记':'标记所选需要报警'}</button>
+          <button class="secondary" ${busy || !rows.length || rows.some(row=>row.processing_complete)?'disabled':''} onclick="performWorkflow('UNREVIEW')">撤销所选已查看</button>
+          <button class="secondary" ${disabled} onclick="reloadWorkflowForm()">放弃草稿并重新加载</button></div>
+          <p class="detail-note">本人填写编号，不是登录认证。记录可被页面访问者读取。报警标记不发送通知；已查看不等于已完成。</p>
+          <p>${escapeHtml(current.headline)}：${escapeHtml(current.description)}</p><p class="detail-note">这是当前设备状态，不代表历史事件中的人员情况。</p>`)}
+        ${recordDetailsPanel(`incident-history-${Number(item.id)}`,`操作历史（最近 ${history.items.length} 条 / 共 ${Number(history.total)} 条）`,historyHtml)}`;
+      workflowRendered={key,values,revision:item.workflow_revision,memberIds:item.candidates.map(row=>row.id)};
       if (focusedId) document.getElementById?.(focusedId)?.focus?.({preventScroll:true});
+    }
+
+    async function performWorkflow(operation, whole=false) {
+      const item=detailIncidentData, id=detailIncidentId;
+      if (!item || id==null || pendingIncidents.has(id)) return;
+      captureWorkflowDraft();
+      const rows=whole ? item.candidates : selectedWorkflowRows(item), key=workflowDraftKey(item), draft=workflowDrafts.get(key);
+      if (!rows.length) { workflowMessage('请先选择处理范围。'); return; }
+      if (rows.length>200) { workflowMessage('一次最多处理 200 条，请选择单条记录分批处理。'); return; }
+      if (!Number.isInteger(item.workflow_revision)) { workflowMessage('当前服务尚不支持处理状态，请确认新版已部署后刷新。'); return; }
+      const body={operation,alert_ids:rows.map(row=>row.id),expected_member_ids:item.candidates.map(row=>row.id),
+        expected_revision:item.workflow_revision,updated_by:document.querySelector('#operator-name').value.trim()};
+      if (!body.updated_by || body.updated_by.length>100) { workflowMessage('请在“更多操作与处理设置”中填写组员编号。'); return; }
+      if (operation==='SAVE' || operation==='FINISH') {
+        body.category=document.querySelector('#workflow-category').value;
+        body.note=document.querySelector('#workflow-note').value.trim();
+        if (Number(item.alarm_marked_count)>0) body.handling_note=document.querySelector('#workflow-handling').value.trim();
+        if (Array.from(body.note).length>1000 || Array.from(body.handling_note || '').length>1000) { workflowMessage('说明最多 1000 字符。'); return; }
+        if (draft) { body.expected_revision=draft.baseRevision; body.expected_member_ids=draft.memberIds; }
+        if (body.expected_revision!==item.workflow_revision || JSON.stringify([...body.expected_member_ids].sort((a,b)=>a-b))!==JSON.stringify(item.candidates.map(row=>row.id).sort((a,b)=>a-b))) {
+          workflowMessage('记录已更新，草稿仍保留。请核对后使用“放弃草稿并重新加载”。'); return;
+        }
+        if (operation==='FINISH') {
+          if (rows.some(row=>row.status!=='ACKNOWLEDGED')) { workflowMessage('请先标记所选记录已查看。'); return; }
+          if (!['SIMULATED_TEST','SUSPECTED_FALSE_POSITIVE','OTHER'].includes(body.category)) { workflowMessage('仍未核实或需要联系核实，请使用“保存进度”。'); return; }
+          if (!body.note) { workflowMessage('请填写核实说明后再完成。'); return; }
+          if (Number(item.alarm_marked_count)>0 && !body.handling_note) { workflowMessage('已标记需要报警，请补充实际后续处理情况。'); return; }
+        }
+        if (rows.some(row=>(row.judgment_note || '').trim() || row.judgment_category!=='UNASSESSED')
+          && rows.some(row=>(row.judgment_note || '')!==body.note || row.judgment_category!==body.category)
+          && !confirm(`将所选 ${rows.length} 条记录的已有核实内容替换为本次内容？未选中的记录不变。`)) return;
+      } else if (['UNREVIEW','REOPEN','ALARM_MARK','ALARM_CLEAR'].includes(operation)
+        && !confirm(`对所选 ${rows.length} 条记录执行“${({UNREVIEW:'撤销已查看',REOPEN:'重新核实',ALARM_MARK:'标记需要报警',ALARM_CLEAR:'取消报警标记'})[operation]}”？\n\n报警标记仅记录决定，不发送通知。`)) return;
+      const apiKey=sessionStorage.getItem('fall_api_key') || prompt('请输入当前服务的操作密钥（仅在本机输入）');
+      if (!apiKey) return; sessionStorage.setItem('fall_api_key',apiKey); rememberOperator();
+      pendingIncidents.add(id); ++incidentDetailRequestId;
+      renderIncidentDetail(item);
+      let notice='';
+      try {
+        const response=await fetch(`/api/v1/incidents/${id}/workflow`,{method:'PATCH',headers:{'Content-Type':'application/json','X-API-Key':apiKey},body:JSON.stringify(body),
+          ...(typeof AbortSignal!=='undefined' && AbortSignal.timeout ? {signal:AbortSignal.timeout(12000)} : {})});
+        if (!response.ok) {
+          if (response.status===401) sessionStorage.removeItem('fall_api_key');
+          const errorBody=await response.json().catch(()=>({}));
+          const errors={REVIEW_REQUIRED:'请先标记所选记录已查看。',VERIFICATION_REQUIRED:'仍需核实，请先保存进度。',NOTE_REQUIRED:'请填写核实说明。',
+            HANDLING_REQUIRED:'请补充实际后续处理情况。',REOPEN_REQUIRED:'已完成的记录请先重新核实。',INVALID_SELECTION:'处理范围不正确，请重新加载核对。'};
+          throw new Error(response.status===409?'记录已被其他操作修改，或加入了新记录。草稿仍保留，请核对后重新加载。'
+            : response.status===401?'操作密钥不正确或已失效，草稿仍保留。':errors[errorBody.detail] || '服务未能保存，请核对记录后重试。');
+        }
+        const result=await response.json(), updated=result.incident;
+        if (operation==='SAVE' || operation==='FINISH') workflowDrafts.delete(key);
+        for (const [draftKey,value] of workflowDrafts) if(draftKey.startsWith(id+':') && value.baseRevision===body.expected_revision
+          && JSON.stringify([...value.memberIds].sort((a,b)=>a-b))===JSON.stringify([...body.expected_member_ids].sort((a,b)=>a-b)))
+          workflowDrafts.set(draftKey,{...value,baseRevision:updated.workflow_revision,memberIds:updated.candidates.map(row=>row.id)});
+        incidentData=incidentData.map(current=>current.id===id?updated:current);
+        alertData=alertData.map(current=>{const row=updated.candidates.find(candidate=>candidate.id===current.id);return row?{...current,...row}:current;});
+        if (detailIncidentId===id) {
+          detailIncidentData=updated;
+          if (operation==='REOPEN') workflowScopes.set(id,defaultWorkflowScope(updated));
+          if (workflowScopes.get(id)==='pending' && !updated.candidates.some(row=>!row.processing_complete)) workflowScopes.set(id,defaultWorkflowScope(updated));
+        }
+        notice=operation==='FINISH'?'所选记录已保存并完成，其他记录不变。':operation==='SAVE'?'进度已保存，未自动标记已查看或完成。'
+          : operation==='REVIEW'?'已标记所选记录已查看，仍需核实。':operation==='REOPEN'?'已重新放回待核实区，原说明保留。':'操作已记录，不会发送通知。';
+      } catch(error) {
+        notice=/请|草稿|服务未能保存|已完成/.test(error.message)?error.message:'未确认保存结果，草稿仍保留。请重新加载核对，不要重复提交。';
+      } finally {
+        pendingIncidents.delete(id); workflowRendered=null; render();
+        if(detailIncidentId===id) workflowMessage(notice);
+      }
     }
 
     function renderDeviceDetail() {
@@ -432,18 +587,21 @@
       const requestId = ++incidentDetailRequestId;
       try {
         const item = await getJson(`/api/v1/incidents/${id}`);
-        if (detailIncidentId === id && requestId === incidentDetailRequestId) {
+        if (detailIncidentId === id && requestId === incidentDetailRequestId && !pendingIncidents.has(id)) {
+          captureWorkflowDraft();
           detailIncidentData = item; renderIncidentDetail(item);
         }
       } catch(error) {
         if (detailIncidentId === id && requestId === incidentDetailRequestId) {
-          detailIncidentData = null;
-          document.querySelector('#incident-detail-body').innerHTML = '<p class="error">暂时无法加载这次提醒，请关闭后重新打开。</p>';
+          if (detailIncidentData) workflowMessage('暂时无法更新详情，草稿保留。请检查网络后重试。');
+          else document.querySelector('#incident-detail-body').innerHTML = '<p class="error">暂时无法加载这次提醒，请关闭后重新打开。</p>';
         }
       }
     }
 
     function showIncidentDetail(id) {
+      captureWorkflowDraft(); workflowRendered=null;
+      if (![...workflowDrafts.keys()].some(key=>key.startsWith(id+':'))) workflowScopes.delete(id);
       detailIncidentId = id;
       detailIncidentData = null;
       document.querySelector('#incident-detail-body').innerHTML = '<p class="muted">正在加载…</p>';
@@ -453,6 +611,7 @@
     }
 
     function closeIncidentDetail() {
+      captureWorkflowDraft(); workflowRendered=null;
       detailIncidentId = null; detailIncidentData = null; ++incidentDetailRequestId;
       document.querySelector('#incident-detail-dialog').close();
     }
@@ -542,10 +701,10 @@
 
     function historyChanges(item) {
       const labels = {status:'查看记录', alarm_required:'需要报警标记',
-        judgment_category:'判断类别', judgment_note:'判断备注'};
+        judgment_category:'核实结果', judgment_note:'核实说明', processing_complete:'处理完成状态'};
       const display = (key, value) => key === 'status' ? (value === 'ACKNOWLEDGED' ? '已查看' : '尚未查看')
         : key === 'alarm_required' ? alarmMarkLabel(value)
-        : key === 'judgment_category' ? categoryLabel(value) : (value || '（空）');
+        : key === 'processing_complete' ? (value?'已完成':'待核实') : key === 'judgment_category' ? categoryLabel(value) : (value || '（空）');
       return Object.entries(labels).filter(([key]) => item.before[key] !== item.after[key])
         .map(([key,label]) => `${label}：${display(key,item.before[key])} → ${display(key,item.after[key])}`).join('\n');
     }
@@ -558,7 +717,7 @@
       return `${includeDetails ? `<button class="secondary" onclick="showAlertDetail(${id})">查看并处理</button>` : ''}
         <button class="${reviewed ? 'reviewed' : 'secondary'}" ${disabled}
           aria-pressed="${reviewed}" title="${reviewed ? '撤销已查看标记' : '标记这条记录已被查看'}"
-          onclick="setReview(${id}, ${!reviewed})">${alertStatusLabel(item.status)}</button>
+          onclick="setReview(${id}, ${!reviewed})">${reviewed?'撤销已查看':'标记已查看'}</button>
         <button class="${alarmRequired ? 'manual-alarm' : 'secondary'}" ${disabled}
           aria-pressed="${alarmRequired}" title="${alarmRequired ? '取消需要报警标记' : '记录需要报警的处理决定'}"
           onclick="setAlarmMark(${id}, ${!alarmRequired})">${alarmRequired ? alarmMarkLabel(true) : '标记需要报警'}</button>`;
@@ -573,6 +732,7 @@
     }
 
     function render() {
+        captureWorkflowDraft();
         const focusedId = document.activeElement?.id;
         renderIncidents();
         if (detailIncidentId != null && detailIncidentData) renderIncidentDetail(detailIncidentData);
@@ -582,11 +742,11 @@
         const devices = deviceData.filter(item => !hideTests || !item.is_test);
         const alerts = alertData.filter(item => (!hideTests || !item.is_test) && (!openOnly || item.status === 'OPEN'));
         const working = devices.filter(item => devicePresentation(item).working).length;
-        const pendingIncidents = incidentData.filter(item => (!hideTests || !item.is_test) && item.review_state !== 'REVIEWED').length;
+        const scopedIncidents = incidentData.filter(item => (!hideTests || !item.is_test) && (!openOnly || workflowState(item)!=='COMPLETED'));
         document.querySelector('#stats').innerHTML = `
-          <div class="stat"><span class="muted">待查看提醒 · 已加载</span><strong>${lastSuccessfulRefreshMs == null ? '—' : pendingIncidents}</strong></div>
-          <div class="stat"><span class="muted">正在检测的设备</span><strong>${pageIsStale() ? '—' : working}</strong></div>
-          <div class="stat"><span class="muted">等待数据或需检查的设备</span><strong>${pageIsStale() ? '—' : devices.length-working}</strong></div>`;
+          ${['UNREAD','VERIFY','COMPLETED'].map(value=>`<div class="stat"><span class="muted">${workflowLabels[value]} · 已加载</span><strong>${pageIsStale() ? '—' : scopedIncidents.filter(item=>workflowState(item)===value).length}</strong></div>`).join('')}`;
+        document.querySelector('#device-status-note').textContent=pageIsStale()?'页面未更新，当前设备状态无法确认。'
+          : `正在检测 ${working} 台，等待数据或需检查 ${devices.length-working} 台。设备状态不代表人员安全。`;
         document.querySelector('#devices').innerHTML = devices.length ? devices.map(item => {
           const view = devicePresentation(item);
           const age = item.monitoring?.report_age_seconds ?? item.age_seconds;
@@ -629,7 +789,7 @@
       const operations = data.operations || [];
       const historyRows = operations.map(item => `<tr>
         <td>${time(item.operated_at)}</td><td>${escapeHtml(item.operated_by)}</td>
-        <td>${escapeHtml(({REVIEW:'查看记录',ALARM_MARK:'需要报警标记',NOTE:'处理备注'})[item.action] || item.action)}</td>
+        <td>${escapeHtml(({REVIEW:'查看记录',UNREVIEW:'撤销已查看',ALARM_MARK:'需要报警标记',ALARM_CLEAR:'取消报警标记',NOTE:'处理备注',SAVE:'保存进度',FINISH:'保存并完成',REOPEN:'重新核实'})[item.action] || item.action)}</td>
         <td class="history-change">${escapeHtml(historyChanges(item))}</td></tr>`).join('');
       document.querySelector('#alert-detail-subtitle').innerHTML =
         `${escapeHtml(alertItem.device_id)} ${testBadge(alertItem.is_test)} · 记录 ${Number(alertItem.id)}`;
@@ -684,6 +844,8 @@
           <p>${escapeHtml(manual || '依据：运动分析评分达到提醒线，触发疑似跌倒提醒。')}</p>
           <p class="detail-note">${manual ? '以上为人工填写的记录，不是系统自动确认的结论。' : '实际情况尚待核实。'}</p>
           <p>查看状态：${alertStatusLabel(alertItem.status)}<br>处理决定：${alarmMarkLabel(alertItem.alarm_required)}</p></div>
+        ${alertItem.processing_complete ? '<p class="detail-note">本条处理记录已完成，修改核实内容将重新待核实。</p>' : ''}
+        ${data.incident_id ? `<button class="secondary" onclick="closeAlertDetail(); showIncidentDetail(${Number(data.incident_id)})">返回提醒处理</button>` : ''}
         ${recordDetailsPanel(`alert-explanation-${Number(alertItem.id)}`,'查看判断依据与前后记录',explanation)}
         <div class="processing-actions"><label>操作员名称<input id="detail-operator-name" type="text" maxlength="100" ${pending}
             value="${escapeHtml(document.querySelector('#operator-name').value)}" placeholder="填写组员编号"
@@ -764,10 +926,10 @@
         // Keep a successful local write when an earlier polling GET finishes later.
         alertData = data[1].map(item => pendingAlerts.has(item.id)
           ? {...item,...alertData.find(current=>current.id === item.id)} : item);
-        incidentData = data[2]; incidentMayHaveMore = incidentData.length === incidentLimit;
+        incidentData = data[2].map(item=>pendingIncidents.has(item.id)?incidentData.find(current=>current.id===item.id) || item:item); incidentMayHaveMore = incidentData.length === incidentLimit;
         lastSuccessfulRefreshMs=Date.now(); refreshSucceeded=true;
         render();
-        if (detailIncidentId != null) loadIncidentDetail(detailIncidentId);
+        if (detailIncidentId != null && !pendingIncidents.has(detailIncidentId)) loadIncidentDetail(detailIncidentId);
         document.querySelector('#message').textContent = `页面已更新 · ${new Date().toLocaleTimeString()}`;
       } catch (error) {
         if (requestId !== refreshRequestId) return;
@@ -872,6 +1034,7 @@
     document.querySelector('#hide-tests').addEventListener('change', changeIncidentFilters);
     document.querySelector('#open-only').addEventListener('change', changeIncidentFilters);
     document.querySelector('#incident-detail-dialog').addEventListener('close', () => {
+      captureWorkflowDraft(); workflowRendered=null;
       if (!document.querySelector('#incident-detail-dialog').open) { detailIncidentId=null; detailIncidentData=null; ++incidentDetailRequestId; }
     });
     document.querySelector('#incident-detail-dialog').addEventListener('click', event => {

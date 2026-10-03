@@ -3,7 +3,7 @@ FROM python:3.13-slim
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY main.py event_evidence.py incident_engine.py dashboard.html ./
+COPY main.py event_evidence.py incident_engine.py workflow.py dashboard.html ./
 RUN mkdir -p /data
 
 ENV FALL_DB_PATH=/data/fall_detection.db

@@ -80,7 +80,7 @@ function check(name,fn){fn();checks++;console.log(`PASS: ${name}`)}
 (async()=>{
   await flush();
   check('reminders precede device state; operator entry is absent from home',()=>{
-    assert.ok(html.indexOf('需要查看的提醒')<html.indexOf('<h2>设备状态'));
+    assert.ok(html.indexOf('需要继续关注')>=0 && html.indexOf('需要继续关注')<html.indexOf('<h2>设备状态'));
     assert.match(html,/<input id="operator-name" type="hidden">/);
   });
   check('offline low score cannot appear as current detection',()=>{
@@ -141,7 +141,7 @@ function check(name,fn){fn();checks++;console.log(`PASS: ${name}`)}
   check('detailed event records start collapsed and retain expansion on refresh',()=>{
     let detail=node('#incident-detail-body').innerHTML;
     assert.match(detail,/<details\s+ontoggle="rememberPanel\('incident-records-1'/);
-    assert.ok(detail.indexOf('查看详细经过与各条记录')<detail.indexOf('查看并处理'));
+    assert.ok(detail.indexOf('查看原始记录（')<detail.indexOf('查看原记录'));
     sandbox.rememberPanel('incident-records-1',true);sandbox.renderIncidentDetail(incidents[0]);
     assert.match(node('#incident-detail-body').innerHTML,/<details open ontoggle="rememberPanel\('incident-records-1'/);
   });
@@ -157,7 +157,7 @@ function check(name,fn){fn();checks++;console.log(`PASS: ${name}`)}
   check('fresh reporting is described as detection, with no safety claim',()=>{
     assert.match(node('#devices').innerHTML,/正在检测/);assert.match(node('#devices').innerHTML,/最近一次检测没有触发跌倒提醒/);
     assert.doesNotMatch(node('#devices').innerHTML,/人员安全|确认安全|没有摔倒/);
-    assert.match(node('#incidents').innerHTML,/尚未查看/);
+    assert.match(node('#incidents').innerHTML,/待查看/);
   });
   check('invalid, stalled, delayed and warming reports are not shown as normal',()=>{
     for(const state of ['INVALID','PROGRESS_UNVERIFIED','DELAY_SUSPECTED','WARMING_UP']){
@@ -202,7 +202,8 @@ function check(name,fn){fn();checks++;console.log(`PASS: ${name}`)}
     assert.equal(current.status,'ACKNOWLEDGED');assert.equal(current.alarm_required,false);
     assert.match(node('#judgment-note').value,/草稿/);assert.match(node('#alert-detail-body').innerHTML,/&lt;img/);
     assert.doesNotMatch(node('#alert-detail-body').innerHTML,/<img src=x/);
-    assert.doesNotMatch(node('#incidents').innerHTML,/查看详情/);assert.match(node('#incident-history').innerHTML,/已查看/);
+    assert.match(node('#incidents').innerHTML,/查看详情/);assert.match(node('#incidents').innerHTML,/待核实/);
+    assert.doesNotMatch(node('#incident-history').innerHTML,/查看详情/);
   });
   await sandbox.saveJudgmentNote(1);await sandbox.setAlarmMark(1,true);await sandbox.setReview(1,false);
   check('notes, alarm mark, revoke and history retain existing behavior',()=>{

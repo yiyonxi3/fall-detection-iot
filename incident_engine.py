@@ -193,6 +193,9 @@ def read(conn, incident_id, reference_time):
     for item in candidates:
         item["is_test"] = bool(item["is_test"])
         item["alarm_required"] = bool(item["alarm_required"])
+        item["processing_complete"] = bool(item["processing_complete"])
+    completed = sum(item["processing_complete"] for item in candidates)
+    read_all = all(item["status"] == "ACKNOWLEDGED" for item in candidates)
     result.update(incident_key=f"incident-{incident_id}", candidate_count=len(candidates),
         model_state="MULTIPLE_CANDIDATES" if len(candidates) > 1 else "SINGLE_CANDIDATE",
         peak_score=max(item["fall_probability"] for item in candidates),
@@ -201,6 +204,8 @@ def read(conn, incident_id, reference_time):
         reviewed_count=sum(item["status"] == "ACKNOWLEDGED" for item in candidates),
         alarm_marked_count=sum(item["alarm_required"] for item in candidates),
         review_state="REVIEWED" if all(item["status"] == "ACKNOWLEDGED" for item in candidates) else "PENDING",
+        completed_count=completed,
+        workflow_state="UNREAD" if not read_all else "COMPLETED" if completed == len(candidates) else "VERIFY",
         evidence=evidence, requires_evidence_check=evidence["state"] == "INCOMPLETE",
         association_window_ms=ASSOCIATION_MS, candidates=candidates,
         assessment="SUSPECTED_EVENT_ONLY", evaluated_at=reference_time,

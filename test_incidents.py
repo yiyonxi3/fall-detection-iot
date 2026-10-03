@@ -218,6 +218,7 @@ class IncidentTests(unittest.TestCase):
         tables = ("telemetry_events", "alerts", "alert_operations", "event_evidence")
         with closing(sqlite3.connect(legacy)) as conn:
             before = {table: conn.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
+            old_columns = {table: [row[1] for row in conn.execute(f"PRAGMA table_info({table})")] for table in tables}
         global main_module
         main_module = importlib.reload(self.main)
         from fastapi.testclient import TestClient
@@ -226,7 +227,8 @@ class IncidentTests(unittest.TestCase):
         self.assertEqual(item["source"], "reconstructed")
         self.assertEqual(item["candidates"][0]["judgment_note"], "保留历史")
         with closing(sqlite3.connect(legacy)) as conn:
-            self.assertEqual({table: conn.execute(f"SELECT * FROM {table}").fetchall() for table in tables}, before)
+            self.assertEqual({table: conn.execute(f"SELECT {','.join(old_columns[table])} FROM {table}").fetchall() for table in tables}, before)
+            self.assertEqual(conn.execute("SELECT processing_complete,processed_at,processed_by FROM alerts").fetchall(), [(0,None,None)])
 
 
 if __name__ == "__main__":
